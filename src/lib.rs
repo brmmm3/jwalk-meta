@@ -454,8 +454,8 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
                             }
                         };
 
-                        let entry_metadata;
-                        let entry_metadata_ext;
+                        let mut entry_metadata = None;
+                        let mut entry_metadata_ext = None;
                         if read_metadata {
                             let metadata = fs_dir_entry.metadata().unwrap();
                             entry_metadata = Some(MetaData {
@@ -469,15 +469,10 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
                                 permissions: metadata.permissions(),
                             });
                             if read_metadata_ext {
-                                entry_metadata_ext = Some(get_metadata_ext(
-                                    &fs::metadata(fs_dir_entry.path()).unwrap(),
-                                ));
-                            } else {
-                                entry_metadata_ext = None;
+                                if let Ok(metadata) = fs::metadata(fs_dir_entry.path()) {
+                                    entry_metadata_ext = Some(get_metadata_ext(&metadata));
+                                }
                             }
-                        } else {
-                            entry_metadata = None;
-                            entry_metadata_ext = None;
                         }
 
                         let dir_entry = match DirEntry::from_entry(
