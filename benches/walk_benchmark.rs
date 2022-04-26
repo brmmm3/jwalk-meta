@@ -1,38 +1,106 @@
 #![allow(dead_code)]
 #![allow(unused_imports)]
 
-use criterion::{criterion_group, criterion_main, Criterion};
-use ignore::WalkBuilder;
-use jwalk::{Error, Parallelism, WalkDir, WalkDirGeneric};
-use num_cpus;
-use rayon::prelude::*;
 use std::cmp;
-use std::fs::Metadata;
+use std::fs::{create_dir_all, File, Metadata};
+use std::io::{self, ErrorKind, Read};
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc;
+
+use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use flate2::read::GzDecoder;
+use ignore::WalkBuilder;
+use num_cpus;
+use rayon::prelude::*;
+use tar::Archive;
 use walkdir;
 
-fn linux_dir() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benches/assets/linux_checkout")
+use jwalk::{Error, Parallelism, WalkDir, WalkDirGeneric};
+
+#[cfg(unix)]
+fn linux_kernel_archive() -> PathBuf {
+    PathBuf::from("~/Rust/_Data/benches/linux-5.9.tar.gz")
 }
 
-fn checkout_linux_if_needed() {
+#[cfg(windows)]
+fn linux_kernel_archive() -> PathBuf {
+    PathBuf::from("C:/Workspace/benches/linux-5.9.tar.gz")
+}
+
+#[cfg(unix)]
+fn linux_dir() -> PathBuf {
+    PathBuf::from("~/Rust/_Data/benches/linux-5.9")
+}
+
+#[cfg(windows)]
+fn linux_dir() -> PathBuf {
+    PathBuf::from("C:/Workspace/benches/linux-5.9")
+}
+
+fn download_linux_kernel() -> Result<(), reqwest::Error> {
+    println!("Downloading linux-5.9.tar.gz...");
+    let mut client = reqwest::blocking::Client::builder();
+    if let Ok(proxy) = std::env::var("HTTP_PROXY") {
+        client = client.proxy(reqwest::Proxy::https(proxy)?);
+    }
+    let client = client.build()?;
+    let mut resp = client
+        .get("https://cdn.kernel.org/pub/linux/kernel/v5.x/linux-5.9.tar.gz")
+        .send()?;
+    let path = linux_kernel_archive();
+    let parent = path.parent().unwrap();
+    if !parent.exists() {
+        println!("Create {:?}", parent);
+        create_dir_all(parent).unwrap();
+    }
+    let path = linux_kernel_archive();
+    println!("Write archive to {:?}", path);
+    let mut out = File::create(&path).expect("failed to create file");
+    io::copy(&mut resp, &mut out).expect("failed to copy content");
+    Ok(())
+}
+
+fn download_and_unpack_linux_kernel() -> Result<(), io::Error> {
+    let linux_kernel_archive = linux_kernel_archive();
+    if !linux_kernel_archive.exists() {
+        // Download linux kernel
+        download_linux_kernel().map_err(|e| io::Error::new(ErrorKind::Other, e.to_string()))?;
+    }
     let linux_dir = linux_dir();
     if !linux_dir.exists() {
-        println!("will git clone linux...");
-        let output = Command::new("git")
-            .arg("clone")
-            .arg("https://github.com/BurntSushi/linux.git")
-            .arg(&linux_dir)
-            .output()
-            .expect("failed to git clone linux");
-        println!("did git clone linux...{:?}", output);
+        let root = linux_dir.parent().unwrap();
+        println!("Extracting linux-5.9.tar.gz to {:?}...", root);
+        let tar_gz = File::open(&linux_kernel_archive)?;
+        let tar = GzDecoder::new(tar_gz);
+        let mut archive = Archive::new(tar);
+        // Unpack only files. Ignore symlinks, etc. Needed for Windows :-(
+        for file in archive.entries().unwrap() {
+            let mut file = file?;
+            if file.header().entry_type().is_file() {
+                let path = root.join(file.path().unwrap());
+                let parent = path.parent().unwrap();
+                if !parent.exists() {
+                    create_dir_all(parent)?;
+                }
+                file.unpack(path)?;
+            }
+        }
     }
+    Ok(())
 }
 
 fn walk_benches(c: &mut Criterion) {
-    checkout_linux_if_needed();
+    download_and_unpack_linux_kernel().unwrap();
+
+    c.bench_function("rayon (unsorted, n threads)", |b| {
+        b.iter(|| black_box(rayon_recursive_descent(linux_dir(), None, false)))
+    });
+
+    c.bench_function("rayon (unsorted, metadata, n threads)", |b| {
+        b.iter(|| black_box(rayon_recursive_descent(linux_dir(), None, true)))
+    });
 
     c.bench_function("jwalk (unsorted, n threads)", |b| {
         b.iter(|| for _ in WalkDir::new(linux_dir()) {})
@@ -46,7 +114,7 @@ fn walk_benches(c: &mut Criterion) {
         b.iter(|| {
             for _ in WalkDirGeneric::<((), Option<Result<Metadata, Error>>)>::new(linux_dir())
                 .sort(true)
-                .process_read_dir(|_, dir_entry_results| {
+                .process_read_dir(|_, _, _, dir_entry_results| {
                     dir_entry_results.iter_mut().for_each(|dir_entry_result| {
                         if let Ok(dir_entry) = dir_entry_result {
                             dir_entry.client_state = Some(dir_entry.metadata());
@@ -95,7 +163,7 @@ fn walk_benches(c: &mut Criterion) {
             for _ in WalkDirGeneric::<((), Option<Result<Metadata, Error>>)>::new(linux_dir())
                 .sort(true)
                 .parallelism(Parallelism::Serial)
-                .process_read_dir(|_, dir_entry_results| {
+                .process_read_dir(|_, _, _, dir_entry_results| {
                     dir_entry_results.iter_mut().for_each(|dir_entry_result| {
                         if let Ok(dir_entry) = dir_entry_result {
                             dir_entry.client_state = Some(dir_entry.metadata());
@@ -195,6 +263,52 @@ fn walk_benches(c: &mut Criterion) {
             }
         })
     });
+}
+
+fn rayon_recursive_descent(
+    root: impl AsRef<Path>,
+    file_type: Option<std::fs::FileType>,
+    get_file_metadata: bool,
+) {
+    let root = root.as_ref();
+    let (_metadata, is_dir) = file_type
+        .map(|ft| {
+            (
+                if !ft.is_dir() && get_file_metadata {
+                    std::fs::symlink_metadata(root).ok()
+                } else {
+                    None
+                },
+                ft.is_dir(),
+            )
+        })
+        .or_else(|| {
+            std::fs::symlink_metadata(root)
+                .map(|m| {
+                    let is_dir = m.file_type().is_dir();
+                    (Some(m), is_dir)
+                })
+                .ok()
+        })
+        .unwrap_or((None, false));
+
+    if is_dir {
+        std::fs::read_dir(root)
+            .map(|iter| {
+                iter.filter_map(Result::ok)
+                    .collect::<Vec<_>>()
+                    .into_par_iter()
+                    .map(|entry| {
+                        rayon_recursive_descent(
+                            entry.path(),
+                            entry.file_type().ok(),
+                            get_file_metadata,
+                        )
+                    })
+                    .for_each(|_| {})
+            })
+            .unwrap_or_default()
+    };
 }
 
 criterion_group! {

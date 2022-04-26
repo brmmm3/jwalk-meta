@@ -22,7 +22,7 @@ use read_dir_iter::*;
 use run_context::*;
 
 pub use self::jwalk_par_bridge::{JWalkIterBridge, JWalkParallelBridge};
-pub use dir_entry::DirEntry;
+pub use dir_entry::{get_metadata_ext, DirEntry, MetaData, MetaDataExt};
 pub use dir_entry_iter::DirEntryIter;
 pub use error::Error;
 pub use read_dir::ReadDir;

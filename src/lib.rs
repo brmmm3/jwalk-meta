@@ -1,3 +1,4 @@
+#![cfg_attr(windows, feature(windows_by_handle))]
 #![warn(clippy::all)]
 
 //! Filesystem walk.
@@ -40,7 +41,8 @@
 //!
 //! # fn try_main() -> Result<(), Error> {
 //! let walk_dir = WalkDirGeneric::<((usize),(bool))>::new("foo")
-//!     .process_read_dir(|read_dir_state, children| {
+
+//!     .process_read_dir(|depth, path, read_dir_state, children| {
 //!         // 1. Custom sort
 //!         children.sort_by(|a, b| match (a, b) {
 //!             (Ok(a), Ok(b)) => a.file_name.cmp(&b.file_name),
@@ -123,9 +125,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::core::{ReadDir, ReadDirSpec};
+use crate::core::{get_metadata_ext, ReadDir, ReadDirSpec};
 
-pub use crate::core::{DirEntry, DirEntryIter, Error};
+pub use crate::core::{DirEntry, DirEntryIter, Error, MetaData, MetaDataExt};
 
 /// Builder for walking a directory.
 pub type WalkDir = WalkDirGeneric<((), ())>;
@@ -160,7 +162,7 @@ pub struct WalkDirGeneric<C: ClientState> {
     options: WalkDirOptions<C>,
 }
 
-type ProcessReadDirFunction<C> = dyn Fn(&mut <C as ClientState>::ReadDirState, &mut Vec<Result<DirEntry<C>>>)
+type ProcessReadDirFunction<C> = dyn Fn(Option<usize>, &Path, &mut <C as ClientState>::ReadDirState, &mut Vec<Result<DirEntry<C>>>)
     + Send
     + Sync
     + 'static;
@@ -190,7 +192,10 @@ struct WalkDirOptions<C: ClientState> {
     max_depth: usize,
     skip_hidden: bool,
     follow_links: bool,
+    read_metadata: bool,
+    read_metadata_ext: bool,
     parallelism: Parallelism,
+    root_read_dir_state: C::ReadDirState,
     process_read_dir: Option<Arc<ProcessReadDirFunction<C>>>,
 }
 
@@ -208,7 +213,10 @@ impl<C: ClientState> WalkDirGeneric<C> {
                 max_depth: ::std::usize::MAX,
                 skip_hidden: true,
                 follow_links: false,
+                read_metadata: false,
+                read_metadata_ext: false,
                 parallelism: Parallelism::RayonDefaultPool,
+                root_read_dir_state: C::ReadDirState::default(),
                 process_read_dir: None,
             },
         }
@@ -287,10 +295,30 @@ impl<C: ClientState> WalkDirGeneric<C> {
         self
     }
 
+    /// Read OS independent metadata
+    pub fn read_metadata(mut self, read_metadata: bool) -> Self {
+        self.options.read_metadata = read_metadata;
+        self
+    }
+
+    /// Read Os dependent metadata
+    pub fn read_metadata_ext(mut self, read_metadata_ext: bool) -> Self {
+        self.options.read_metadata_ext = read_metadata_ext;
+        self
+    }
+
     /// Degree of parallelism to use when performing walk. Defaults to
     /// [`Parallelism::RayonDefaultPool`](enum.Parallelism.html#variant.RayonDefaultPool).
     pub fn parallelism(mut self, parallelism: Parallelism) -> Self {
         self.options.parallelism = parallelism;
+        self
+    }
+
+    /// Initial ClientState::ReadDirState that is passed to
+    /// [`process_read_dir`](struct.WalkDirGeneric.html#method.process_read_dir)
+    /// when processing root. Defaults to ClientState::ReadDirState::default().
+    pub fn root_read_dir_state(mut self, read_dir_state: C::ReadDirState) -> Self {
+        self.options.root_read_dir_state = read_dir_state;
         self
     }
 
@@ -303,7 +331,10 @@ impl<C: ClientState> WalkDirGeneric<C> {
     /// to store custom state with an entry.
     pub fn process_read_dir<F>(mut self, process_by: F) -> Self
     where
-        F: Fn(&mut C::ReadDirState, &mut Vec<Result<DirEntry<C>>>) + Send + Sync + 'static,
+        F: Fn(Option<usize>, &Path, &mut C::ReadDirState, &mut Vec<Result<DirEntry<C>>>)
+            + Send
+            + Sync
+            + 'static,
     {
         self.options.process_read_dir = Some(Arc::new(process_by));
         self
@@ -352,26 +383,43 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
         let parallelism = self.options.parallelism;
         let skip_hidden = self.options.skip_hidden;
         let follow_links = self.options.follow_links;
+        let read_metadata = self.options.read_metadata;
+        let read_metadata_ext = self.options.read_metadata_ext;
         let process_read_dir = self.options.process_read_dir.clone();
+        let mut root_read_dir_state = self.options.root_read_dir_state;
         let follow_link_ancestors = if follow_links {
             Arc::new(vec![Arc::from(self.root.clone()) as Arc<Path>])
         } else {
             Arc::new(vec![])
         };
 
-        let mut root_entry_results = vec![process_dir_entry_result(
-            DirEntry::from_path(0, &self.root, false, follow_link_ancestors),
-            follow_links,
-        )];
-
+        let root_entry = DirEntry::from_path(
+            0,
+            &self.root,
+            read_metadata,
+            read_metadata_ext,
+            false,
+            follow_link_ancestors,
+        );
+        let root_parent_path = root_entry
+            .as_ref()
+            .map(|root| root.parent_path().to_owned())
+            .unwrap_or_default();
+        let mut root_entry_results = vec![process_dir_entry_result(root_entry, follow_links)];
         if let Some(process_read_dir) = process_read_dir.as_ref() {
-            process_read_dir(&mut C::ReadDirState::default(), &mut root_entry_results);
+            process_read_dir(
+                None,
+                &root_parent_path,
+                &mut root_read_dir_state,
+                &mut root_entry_results,
+            );
         }
 
         DirEntryIter::new(
             root_entry_results,
             parallelism,
             min_depth,
+            root_read_dir_state.clone(),
             Arc::new(move |read_dir_spec| {
                 let ReadDirSpec {
                     path,
@@ -380,9 +428,10 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
                     mut follow_link_ancestors,
                 } = read_dir_spec;
 
-                let depth = depth + 1;
+                let read_dir_depth = depth;
+                let read_dir_contents_depth = depth + 1;
 
-                if depth > max_depth {
+                if read_dir_contents_depth > max_depth {
                     return Ok(ReadDir::new(client_read_state, Vec::new()));
                 }
 
@@ -400,12 +449,42 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
                     .filter_map(|dir_entry_result| {
                         let fs_dir_entry = match dir_entry_result {
                             Ok(fs_dir_entry) => fs_dir_entry,
-                            Err(err) => return Some(Err(Error::from_io(depth, err))),
+                            Err(err) => {
+                                return Some(Err(Error::from_io(read_dir_contents_depth, err)))
+                            }
                         };
 
+                        let entry_metadata;
+                        let entry_metadata_ext;
+                        if read_metadata {
+                            let metadata = fs_dir_entry.metadata().unwrap();
+                            entry_metadata = Some(MetaData {
+                                is_dir: metadata.is_dir(),
+                                is_file: metadata.is_file(),
+                                is_symlink: metadata.is_symlink(),
+                                size: metadata.len(),
+                                created: metadata.created().map_or(None, |x| Some(x)),
+                                modified: metadata.modified().map_or(None, |x| Some(x)),
+                                accessed: metadata.accessed().map_or(None, |x| Some(x)),
+                                permissions: metadata.permissions(),
+                            });
+                            if read_metadata_ext {
+                                entry_metadata_ext = Some(get_metadata_ext(
+                                    &fs::metadata(fs_dir_entry.path()).unwrap(),
+                                ));
+                            } else {
+                                entry_metadata_ext = None;
+                            }
+                        } else {
+                            entry_metadata = None;
+                            entry_metadata_ext = None;
+                        }
+
                         let dir_entry = match DirEntry::from_entry(
-                            depth,
+                            read_dir_contents_depth,
                             path.clone(),
+                            entry_metadata,
+                            entry_metadata_ext,
                             &fs_dir_entry,
                             follow_link_ancestors.clone(),
                         ) {
@@ -431,7 +510,12 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
                 }
 
                 if let Some(process_read_dir) = process_read_dir.as_ref() {
-                    process_read_dir(&mut client_read_state, &mut dir_entry_results);
+                    process_read_dir(
+                        Some(read_dir_depth),
+                        path.as_ref(),
+                        &mut client_read_state,
+                        &mut dir_entry_results,
+                    );
                 }
 
                 Ok(ReadDir::new(client_read_state, dir_entry_results))
@@ -448,7 +532,10 @@ impl<C: ClientState> Clone for WalkDirOptions<C> {
             max_depth: self.max_depth,
             skip_hidden: self.skip_hidden,
             follow_links: self.follow_links,
+            read_metadata: self.read_metadata,
+            read_metadata_ext: self.read_metadata_ext,
             parallelism: self.parallelism.clone(),
+            root_read_dir_state: self.root_read_dir_state.clone(),
             process_read_dir: self.process_read_dir.clone(),
         }
     }
