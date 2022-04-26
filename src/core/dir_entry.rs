@@ -1,10 +1,77 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs::{self, FileType};
+use std::fs::{self, FileType, Permissions};
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+#[cfg(windows)]
+use std::os::windows::prelude::*;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use crate::{ClientState, Error, ReadDirSpec, Result};
+
+#[inline]
+pub fn get_metadata_ext(metadata: &fs::Metadata) -> MetaDataExt {
+    #[cfg(unix)]
+    {
+        return MetaDataExt {
+            st_mode: metadata.mode(),
+            st_ino: metadata.ino(),
+            st_dev: metadata.dev(),
+            st_nlink: metadata.nlink(),
+            st_blksize: metadata.blksize(),
+            st_blocks: metadata.blocks(),
+            st_uid: metadata.uid(),
+            st_gid: metadata.gid(),
+            st_rdev: metadata.rdev(),
+        };
+    }
+    #[cfg(windows)]
+    {
+        return MetaDataExt {
+            file_attributes: metadata.file_attributes(),
+            volume_serial_number: metadata.volume_serial_number(),
+            number_of_links: metadata.number_of_links(),
+            file_index: metadata.file_index(),
+        };
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct MetaData {
+    pub is_dir: bool,
+    pub is_file: bool,
+    pub is_symlink: bool,
+    pub size: u64,
+    pub created: Option<SystemTime>,
+    pub modified: Option<SystemTime>,
+    pub accessed: Option<SystemTime>,
+    pub permissions: Permissions,
+}
+
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+pub struct MetaDataExt {
+    pub st_mode: u32,
+    pub st_ino: u64,
+    pub st_dev: u64,
+    pub st_nlink: u64,
+    pub st_blksize: u64,
+    pub st_blocks: u64,
+    pub st_uid: u32,
+    pub st_gid: u32,
+    pub st_rdev: u64,
+}
+
+#[cfg(windows)]
+#[derive(Debug, Clone)]
+pub struct MetaDataExt {
+    pub file_attributes: u32,
+    pub volume_serial_number: Option<u32>,
+    pub number_of_links: Option<u32>,
+    pub file_index: Option<u64>,
+}
 
 /// Representation of a file or directory.
 ///
@@ -35,6 +102,12 @@ pub struct DirEntry<C: ClientState> {
     /// If `read_children_path` is set and resulting `fs::read_dir` generates an error
     /// then that error is stored here.
     pub read_children_error: Option<Error>,
+    /// OS independent metadata
+    pub read_metadata: bool,
+    pub metadata: Option<MetaData>,
+    /// OS dependent extended metadata
+    pub read_metadata_ext: bool,
+    pub metadata_ext: Option<MetaDataExt>,
     // True if [`follow_links`] is `true` AND was created from a symlink path.
     follow_link: bool,
     // Origins of synlinks followed to get to this entry.
@@ -45,6 +118,8 @@ impl<C: ClientState> DirEntry<C> {
     pub(crate) fn from_entry(
         depth: usize,
         parent_path: Arc<Path>,
+        metadata: Option<MetaData>,
+        metadata_ext: Option<MetaDataExt>,
         fs_dir_entry: &fs::DirEntry,
         follow_link_ancestors: Arc<Vec<Arc<Path>>>,
     ) -> Result<Self> {
@@ -66,6 +141,10 @@ impl<C: ClientState> DirEntry<C> {
             read_children_path,
             read_children_error: None,
             client_state: C::DirEntryState::default(),
+            read_metadata: metadata.is_some(),
+            metadata,
+            read_metadata_ext: metadata_ext.is_some(),
+            metadata_ext,
             follow_link: false,
             follow_link_ancestors,
         })
@@ -75,6 +154,8 @@ impl<C: ClientState> DirEntry<C> {
     pub(crate) fn from_path(
         depth: usize,
         path: &Path,
+        read_metadata: bool,
+        read_metadata_ext: bool,
         follow_link: bool,
         follow_link_ancestors: Arc<Vec<Arc<Path>>>,
     ) -> Result<Self> {
@@ -85,15 +166,36 @@ impl<C: ClientState> DirEntry<C> {
                 .map_err(|err| Error::from_path(depth, path.to_owned(), err))?
         };
 
-        let root_name = path.file_name().unwrap_or_else(|| {
-            path.as_os_str()
-        });
+        let root_name = path.file_name().unwrap_or_else(|| path.as_os_str());
 
         let read_children_path: Option<Arc<Path>> = if metadata.file_type().is_dir() {
             Some(Arc::from(path))
         } else {
             None
         };
+
+        let entry_metadata;
+        let entry_metadata_ext;
+        if read_metadata {
+            entry_metadata = Some(MetaData {
+                is_dir: metadata.is_dir(),
+                is_file: metadata.is_file(),
+                is_symlink: metadata.is_symlink(),
+                size: metadata.len(),
+                created: metadata.created().map_or(None, |x| Some(x)),
+                modified: metadata.modified().map_or(None, |x| Some(x)),
+                accessed: metadata.accessed().map_or(None, |x| Some(x)),
+                permissions: metadata.permissions(),
+            });
+            if read_metadata_ext {
+                entry_metadata_ext = Some(get_metadata_ext(&metadata));
+            } else {
+                entry_metadata_ext = None;
+            }
+        } else {
+            entry_metadata = None;
+            entry_metadata_ext = None;
+        }
 
         Ok(DirEntry {
             depth,
@@ -103,6 +205,10 @@ impl<C: ClientState> DirEntry<C> {
             read_children_path,
             read_children_error: None,
             client_state: C::DirEntryState::default(),
+            read_metadata,
+            metadata: entry_metadata,
+            read_metadata_ext,
+            metadata_ext: entry_metadata_ext,
             follow_link,
             follow_link_ancestors,
         })
@@ -213,7 +319,14 @@ impl<C: ClientState> DirEntry<C> {
     pub(crate) fn follow_symlink(&self) -> Result<Self> {
         let path = self.path();
         let origins = self.follow_link_ancestors.clone();
-        let dir_entry = DirEntry::from_path(self.depth, &path, true, origins)?;
+        let dir_entry = DirEntry::from_path(
+            self.depth,
+            &path,
+            self.read_metadata,
+            self.read_metadata_ext,
+            true,
+            origins,
+        )?;
 
         if dir_entry.file_type.is_dir() {
             let target = std::fs::read_link(&path).unwrap();

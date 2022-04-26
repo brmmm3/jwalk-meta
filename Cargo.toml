@@ -1,32 +1,35 @@
 [package]
 name = "jwalk"
-version = "0.5.2-alpha.0"
-authors = ["Jesse Grosjean <jesse@hogbaysoftware.com>"]
+version = "0.7.0"
+authors = ["Jesse Grosjean <jesse@hogbaysoftware.com>", "Martin Bammer <mrbm74@gmail.com>"]
 description = "Filesystem walk performed in parallel with streamed and sorted results."
 documentation = "https://docs.rs/jwalk/"
-homepage = "https://github.com/jessegrosjean/jwalk"
-repository = "https://github.com/jessegrosjean/jwalk"
+homepage = "https://github.com/brmmm3/jwalk"
+repository = "https://github.com/brmmm3/jwalk"
 readme = "README.md"
 keywords = ["directory", "recursive", "walk", "iterator", "parallel"]
 categories = ["filesystem", "concurrency"]
 license = "MIT"
-edition = "2018"
+edition = "2021"
 
 [badges]
-travis-ci = { repository = "jessegrosjean/jwalk" }
+travis-ci = { repository = "brmmm3/jwalk" }
 
 [dependencies]
-rayon = "1.3"
-crossbeam = "0.7"
+rayon = "1.5"
+crossbeam = "0.8"
 
 [dev-dependencies]
-criterion = "0.3"
-fs_extra = "1.1"
+criterion = { version = "0.3", features = ["html_reports"] }
+fs_extra = "1.2"
 walkdir = "2.3"
 ignore = "0.4"
-tempfile = "3.1"
-num_cpus = "1.12"
+tempfile = "3.3"
+num_cpus = "1.13"
 lazy_static = "1.4"
+reqwest = { version = "0.11", features = ["blocking"] }
+flate2 = "1.0"
+tar = "0.4"
 
 [[bench]]
 name = "walk_benchmark"
