@@ -4,7 +4,7 @@ jwalk
 Filesystem walk.
 
 - Performed in parallel using rayon
-- Entries streamed in sorted order 
+- Entries streamed in sorted order
 - Custom sort/filter/skip/state
 
 [![Build Status](https://travis-ci.org/jessegrosjean/jwalk.svg?branch=master)](https://travis-ci.org/jessegrosjean/jwalk)
@@ -16,7 +16,7 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-jwalk = "0.5"
+jwalk = "0.7"
 ```
 
 Lean More: [docs.rs/jwalk](https://docs.rs/jwalk)
