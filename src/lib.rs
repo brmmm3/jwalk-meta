@@ -457,17 +457,29 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
                         let mut entry_metadata = None;
                         let mut entry_metadata_ext = None;
                         if read_metadata {
-                            let metadata = fs_dir_entry.metadata().unwrap();
-                            entry_metadata = Some(MetaData {
-                                is_dir: metadata.is_dir(),
-                                is_file: metadata.is_file(),
-                                is_symlink: metadata.is_symlink(),
-                                size: metadata.len(),
-                                created: metadata.created().map_or(None, |x| Some(x)),
-                                modified: metadata.modified().map_or(None, |x| Some(x)),
-                                accessed: metadata.accessed().map_or(None, |x| Some(x)),
-                                permissions: metadata.permissions(),
-                            });
+                            if let Ok(metadata) = fs_dir_entry.metadata() {
+                                entry_metadata = Some(MetaData {
+                                    is_dir: metadata.is_dir(),
+                                    is_file: metadata.is_file(),
+                                    is_symlink: metadata.is_symlink(),
+                                    size: metadata.len(),
+                                    created: metadata.created().map_or(None, |x| Some(x)),
+                                    modified: metadata.modified().map_or(None, |x| Some(x)),
+                                    accessed: metadata.accessed().map_or(None, |x| Some(x)),
+                                    permissions: Some(metadata.permissions()),
+                                });
+                            } else if let Ok(file_type) = fs_dir_entry.file_type() {
+                                entry_metadata = Some(MetaData {
+                                    is_dir: file_type.is_dir(),
+                                    is_file: file_type.is_file(),
+                                    is_symlink: file_type.is_symlink(),
+                                    size: 0,
+                                    created: None,
+                                    modified: None,
+                                    accessed: None,
+                                    permissions: None,
+                                });
+                            }
                             if read_metadata_ext {
                                 if let Ok(metadata) = fs::metadata(fs_dir_entry.path()) {
                                     entry_metadata_ext = Some(get_metadata_ext(&metadata));

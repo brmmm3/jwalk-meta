@@ -40,6 +40,7 @@ pub fn get_metadata_ext(metadata: &fs::Metadata) -> MetaDataExt {
 
 #[derive(Debug, Clone)]
 pub struct MetaData {
+    /// True if DirEntry is a directory
     pub is_dir: bool,
     pub is_file: bool,
     pub is_symlink: bool,
@@ -47,7 +48,7 @@ pub struct MetaData {
     pub created: Option<SystemTime>,
     pub modified: Option<SystemTime>,
     pub accessed: Option<SystemTime>,
-    pub permissions: Permissions,
+    pub permissions: Option<Permissions>,
 }
 
 #[cfg(unix)]
@@ -185,7 +186,7 @@ impl<C: ClientState> DirEntry<C> {
                 created: metadata.created().map_or(None, |x| Some(x)),
                 modified: metadata.modified().map_or(None, |x| Some(x)),
                 accessed: metadata.accessed().map_or(None, |x| Some(x)),
-                permissions: metadata.permissions(),
+                permissions: Some(metadata.permissions()),
             });
             if read_metadata_ext {
                 entry_metadata_ext = Some(get_metadata_ext(&metadata));
