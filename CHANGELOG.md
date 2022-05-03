@@ -1,16 +1,20 @@
-# 0.7
+# 0.7.1
+
+Do not crash on file permission error.
+
+# 0.7.0
 
 Added argument read_metadata und read_metadata_ext to method new.
 Extended DirEntry struct with optional MetaData and MetaDataExt.
 
-# 0.6
+# 0.6.0
 
 Added depth and path being read to params to ProcessReadDirFunction callback.
 
 Allow setting initial root_read_dir_state (ReadDirState) instead of always
 getting ::default() value.
 
-# 0.5
+# 0.5.0
 
 First major change is that API and behavior are now closer to [`walkdir`] and
 jwalk now runs the majority of `walkdir`s tests.
