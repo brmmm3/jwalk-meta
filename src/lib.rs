@@ -1,4 +1,5 @@
 #![warn(clippy::all)]
+#![cfg_attr(windows, feature(windows_by_handle))]
 
 //! Filesystem walk.
 //!

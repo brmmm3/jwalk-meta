@@ -1,3 +1,7 @@
+# 0.8.1
+
+Fix Windows issues.
+
 # 0.8.0
 
 Fix clippy findings and make some methods of DirEntry public.

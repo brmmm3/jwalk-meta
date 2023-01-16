@@ -7,7 +7,10 @@ use std::fs::{self, Permissions};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
+use std::os::windows::fs::MetadataExt;
+#[cfg(windows)]
 use std::ptr;
+use std::time::SystemTime;
 #[cfg(windows)]
 use std::{fs::File, mem::zeroed};
 #[cfg(windows)]
@@ -18,7 +21,6 @@ use winapi::um::{
     ioapiset::DeviceIoControl, winioctl::FSCTL_GET_REPARSE_POINT,
     winnt::FILE_ATTRIBUTE_REPARSE_POINT, winnt::MAXIMUM_REPARSE_DATA_BUFFER_SIZE,
 };
-use std::time::SystemTime;
 
 #[inline]
 pub fn get_metadata_ext(metadata: &fs::Metadata) -> MetaDataExt {
@@ -125,11 +127,21 @@ pub trait FileExt: std::os::windows::io::AsRawHandle {
             Ok(info)
         }
     }
+
+    #[cfg(windows)]
+    fn volume_serial_number(&self) -> std::io::Result<u64> {
+        Ok(0)
+    }
+
+    #[cfg(windows)]
+    fn portable_ino(&self) -> std::io::Result<u64> {
+        Ok(0)
+    }
 }
 
 #[cfg(windows)]
 impl FileExt for File {
-    fn volume_serial_number(&self) -> Option<u64> {
+    fn volume_serial_number(&self) -> std::io::Result<u64> {
         let info = self.get_file_info()?;
         Ok(info.dwVolumeSerialNumber.into())
     }
