@@ -1,3 +1,7 @@
+# 0.8.0
+
+Fix clippy findings and make some methods of DirEntry public.
+
 # 0.7.1
 
 Do not crash on file permission error.
