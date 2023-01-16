@@ -1,5 +1,6 @@
 mod dir_entry;
 mod dir_entry_iter;
+mod metadata;
 mod error;
 mod index_path;
 mod jwalk_par_bridge;
@@ -22,10 +23,11 @@ use read_dir_iter::*;
 use run_context::*;
 
 pub use self::jwalk_par_bridge::{JWalkIterBridge, JWalkParallelBridge};
-pub use dir_entry::{get_metadata_ext, DirEntry, MetaData, MetaDataExt};
+pub use dir_entry::{DirEntry};
 pub use dir_entry_iter::DirEntryIter;
 pub use error::Error;
 pub use read_dir::ReadDir;
 pub use read_dir_spec::ReadDirSpec;
+pub use metadata::{get_metadata_ext, MetaData, MetaDataExt};
 
 use crate::{ClientState, Parallelism};

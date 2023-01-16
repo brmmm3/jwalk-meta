@@ -1,78 +1,10 @@
 use std::ffi::{OsStr, OsString};
 use std::fmt;
-use std::fs::{self, FileType, Permissions};
-#[cfg(unix)]
-use std::os::unix::fs::MetadataExt;
-#[cfg(windows)]
-use std::os::windows::prelude::*;
+use std::fs::{self, FileType};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::SystemTime;
 
-use crate::{ClientState, Error, ReadDirSpec, Result};
-
-#[inline]
-pub fn get_metadata_ext(metadata: &fs::Metadata) -> MetaDataExt {
-    #[cfg(unix)]
-    {
-        return MetaDataExt {
-            st_mode: metadata.mode(),
-            st_ino: metadata.ino(),
-            st_dev: metadata.dev(),
-            st_nlink: metadata.nlink(),
-            st_blksize: metadata.blksize(),
-            st_blocks: metadata.blocks(),
-            st_uid: metadata.uid(),
-            st_gid: metadata.gid(),
-            st_rdev: metadata.rdev(),
-        };
-    }
-    #[cfg(windows)]
-    {
-        return MetaDataExt {
-            file_attributes: metadata.file_attributes(),
-            volume_serial_number: metadata.volume_serial_number(),
-            number_of_links: metadata.number_of_links(),
-            file_index: metadata.file_index(),
-        };
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct MetaData {
-    /// True if DirEntry is a directory
-    pub is_dir: bool,
-    pub is_file: bool,
-    pub is_symlink: bool,
-    pub size: u64,
-    pub created: Option<SystemTime>,
-    pub modified: Option<SystemTime>,
-    pub accessed: Option<SystemTime>,
-    pub permissions: Option<Permissions>,
-}
-
-#[cfg(unix)]
-#[derive(Debug, Clone)]
-pub struct MetaDataExt {
-    pub st_mode: u32,
-    pub st_ino: u64,
-    pub st_dev: u64,
-    pub st_nlink: u64,
-    pub st_blksize: u64,
-    pub st_blocks: u64,
-    pub st_uid: u32,
-    pub st_gid: u32,
-    pub st_rdev: u64,
-}
-
-#[cfg(windows)]
-#[derive(Debug, Clone)]
-pub struct MetaDataExt {
-    pub file_attributes: u32,
-    pub volume_serial_number: Option<u32>,
-    pub number_of_links: Option<u32>,
-    pub file_index: Option<u64>,
-}
+use crate::{ClientState, Error, ReadDirSpec, Result, MetaData, get_metadata_ext, MetaDataExt};
 
 /// Representation of a file or directory.
 ///
@@ -116,7 +48,7 @@ pub struct DirEntry<C: ClientState> {
 }
 
 impl<C: ClientState> DirEntry<C> {
-    pub(crate) fn from_entry(
+    pub fn from_entry(
         depth: usize,
         parent_path: Arc<Path>,
         metadata: Option<MetaData>,
@@ -152,7 +84,7 @@ impl<C: ClientState> DirEntry<C> {
     }
 
     // Only used for root and when following links.
-    pub(crate) fn from_path(
+    pub fn from_path(
         depth: usize,
         path: &Path,
         read_metadata: bool,
@@ -167,7 +99,7 @@ impl<C: ClientState> DirEntry<C> {
                 .map_err(|err| Error::from_path(depth, path.to_owned(), err))?
         };
 
-        let root_name = path.file_name().unwrap_or_else(|| path.as_os_str());
+        let root_name = path.file_name().unwrap_or(path.as_os_str());
 
         let read_children_path: Option<Arc<Path>> = if metadata.file_type().is_dir() {
             Some(Arc::from(path))
@@ -183,9 +115,9 @@ impl<C: ClientState> DirEntry<C> {
                 is_file: metadata.is_file(),
                 is_symlink: metadata.is_symlink(),
                 size: metadata.len(),
-                created: metadata.created().map_or(None, |x| Some(x)),
-                modified: metadata.modified().map_or(None, |x| Some(x)),
-                accessed: metadata.accessed().map_or(None, |x| Some(x)),
+                created: metadata.created().ok(),
+                modified: metadata.modified().ok(),
+                accessed: metadata.accessed().ok(),
                 permissions: Some(metadata.permissions()),
             });
             if read_metadata_ext {
@@ -305,16 +237,12 @@ impl<C: ClientState> DirEntry<C> {
         &self,
         client_read_state: C::ReadDirState,
     ) -> Option<ReadDirSpec<C>> {
-        if let Some(read_children_path) = self.read_children_path.as_ref() {
-            Some(ReadDirSpec {
+        self.read_children_path.as_ref().map(|read_children_path| ReadDirSpec {
                 depth: self.depth,
                 client_read_state,
                 path: read_children_path.clone(),
                 follow_link_ancestors: self.follow_link_ancestors.clone(),
             })
-        } else {
-            None
-        }
     }
 
     pub(crate) fn follow_symlink(&self) -> Result<Self> {

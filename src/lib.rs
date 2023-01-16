@@ -1,4 +1,3 @@
-#![cfg_attr(windows, feature(windows_by_handle))]
 #![warn(clippy::all)]
 
 //! Filesystem walk.
@@ -419,7 +418,7 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
             root_entry_results,
             parallelism,
             min_depth,
-            root_read_dir_state.clone(),
+            root_read_dir_state,
             Arc::new(move |read_dir_spec| {
                 let ReadDirSpec {
                     path,
@@ -463,9 +462,9 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
                                     is_file: metadata.is_file(),
                                     is_symlink: metadata.is_symlink(),
                                     size: metadata.len(),
-                                    created: metadata.created().map_or(None, |x| Some(x)),
-                                    modified: metadata.modified().map_or(None, |x| Some(x)),
-                                    accessed: metadata.accessed().map_or(None, |x| Some(x)),
+                                    created: metadata.created().ok(),
+                                    modified: metadata.modified().ok(),
+                                    accessed: metadata.accessed().ok(),
                                     permissions: Some(metadata.permissions()),
                                 });
                             } else if let Ok(file_type) = fs_dir_entry.file_type() {
