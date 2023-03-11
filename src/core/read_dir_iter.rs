@@ -9,9 +9,9 @@ pub(crate) type ReadDirCallback<C> =
 
 /// Result<ReadDir> Iterator.
 ///
-/// Yeilds ReadDirs (results of fs::read_dir) in order required for recursive
+/// Yields ReadDirs (results of fs::read_dir) in order required for recursive
 /// directory traversal. Depending on Walk/ParWalk state these reads might be
-/// computed in parellel.
+/// computed in parallel.
 pub enum ReadDirIter<C: ClientState> {
     Walk {
         read_dir_spec_stack: Vec<ReadDirSpec<C>>,
@@ -125,6 +125,7 @@ fn multi_threaded_walk_dir<C: ClientState>(
         .as_ref()
         .ok()
         .map(|read_dir| read_dir.ordered_read_children_specs(&index_path));
+
     let ordered_read_dir_result = Ordered::new(
         read_dir_result,
         index_path,

@@ -1,3 +1,8 @@
+# 0.8.3
+
+Fix dependencies problems.
+Fix several typos.
+
 # 0.8.2
 
 Update dependencies.

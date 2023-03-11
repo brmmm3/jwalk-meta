@@ -155,9 +155,9 @@ impl FileExt for File {
 #[cfg(windows)]
 #[allow(non_snake_case, non_camel_case_types)]
 pub struct REPARSE_DATA_BUFFER {
-    pub ReparseTag: libc::c_uint,
-    pub ReparseDataLength: libc::c_ushort,
-    pub Reserved: libc::c_ushort,
+    pub ReparseTag: u32,
+    pub ReparseDataLength: u16,
+    pub Reserved: u16,
     pub rest: (),
 }
 
