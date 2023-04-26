@@ -1,8 +1,7 @@
 use std::env;
 use std::error;
 use std::fs::{self, File};
-#[cfg(unix)]
-use std::io;
+use std::io::{self};
 use std::path::{Path, PathBuf};
 use std::result;
 
@@ -28,7 +27,6 @@ pub struct RecursiveResults<C: ClientState> {
 
 impl<C: ClientState> RecursiveResults<C> {
     /// Return all of the errors encountered during traversal.
-    #[cfg(unix)]
     pub fn errs(&self) -> &[Error] {
         &self.errs
     }
@@ -146,8 +144,7 @@ impl Dir {
     }
 
     /// Create a file symlink to the given src with the given link name.
-    #[cfg(unix)]
-pub fn symlink_file<P1: AsRef<Path>, P2: AsRef<Path>>(&self, src: P1, link_name: P2) {
+    pub fn symlink_file<P1: AsRef<Path>, P2: AsRef<Path>>(&self, src: P1, link_name: P2) {
         #[cfg(windows)]
         fn imp(src: &Path, link_name: &Path) -> io::Result<()> {
             use std::os::windows::fs::symlink_file;
@@ -174,7 +171,6 @@ pub fn symlink_file<P1: AsRef<Path>, P2: AsRef<Path>>(&self, src: P1, link_name:
     }
 
     /// Create a directory symlink to the given src with the given link name.
-    #[cfg(unix)]
     pub fn symlink_dir<P1: AsRef<Path>, P2: AsRef<Path>>(&self, src: P1, link_name: P2) {
         #[cfg(windows)]
         fn imp(src: &Path, link_name: &Path) -> io::Result<()> {

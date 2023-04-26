@@ -23,11 +23,11 @@ pub enum ReadDirIter<C: ClientState> {
 }
 
 impl<C: ClientState> ReadDirIter<C> {
-    pub(crate) fn new(
+    pub(crate) fn try_new(
         read_dir_specs: Vec<ReadDirSpec<C>>,
         parallelism: Parallelism,
         core_read_dir_callback: Arc<ReadDirCallback<C>>,
-    ) -> Self {
+    ) -> Option<Self> {
         if let Parallelism::Serial = parallelism {
             ReadDirIter::Walk {
                 read_dir_spec_stack: read_dir_specs,
@@ -37,42 +37,51 @@ impl<C: ClientState> ReadDirIter<C> {
             let stop = Arc::new(AtomicBool::new(false));
             let read_dir_result_queue = new_ordered_queue(stop.clone(), Ordering::Strict);
             let (read_dir_result_queue, read_dir_result_iter) = read_dir_result_queue;
+            let read_dir_spec_queue = new_ordered_queue(stop.clone(), Ordering::Relaxed);
+            let (read_dir_spec_queue, read_dir_spec_iter) = read_dir_spec_queue;
 
-            let walk_closure = move || {
-                let read_dir_spec_queue = new_ordered_queue(stop.clone(), Ordering::Relaxed);
-                let (read_dir_spec_queue, read_dir_spec_iter) = read_dir_spec_queue;
+            for (i, read_dir_spec) in read_dir_specs.into_iter().enumerate() {
+                read_dir_spec_queue
+                    .push(Ordered::new(read_dir_spec, IndexPath::new(vec![0]), i))
+                    .unwrap();
+            }
 
-                for (i, read_dir_spec) in read_dir_specs.into_iter().enumerate() {
-                    read_dir_spec_queue
-                        .push(Ordered::new(read_dir_spec, IndexPath::new(vec![0]), i))
-                        .unwrap();
-                }
-
-                let run_context = RunContext {
-                    stop,
-                    read_dir_spec_queue,
-                    read_dir_result_queue,
-                    core_read_dir_callback,
-                };
-
-                parallelism.install(move || {
-                    rayon::spawn(|| {
-                        read_dir_spec_iter.jwalk_par_bridge().for_each_with(
-                            run_context,
-                            |run_context, ordered_read_dir_spec| {
-                                multi_threaded_walk_dir(ordered_read_dir_spec, run_context);
-                            },
-                        );
-                    });
-                });
+            let run_context = RunContext {
+                stop,
+                read_dir_spec_queue,
+                read_dir_result_queue,
+                core_read_dir_callback,
             };
 
-            std::thread::spawn(walk_closure);
-
+            let (startup_tx, startup_rx) = parallelism
+                .timeout()
+                .map(|duration| {
+                    let (tx, rx) = crossbeam::channel::unbounded();
+                    (Some(tx), Some((rx, duration)))
+                })
+                .unwrap_or((None, None));
+            parallelism.spawn(move || {
+                if let Some(tx) = startup_tx {
+                    if tx.send(()).is_err() {
+                        // rayon didn't install this function in time so the listener exited. Do the same.
+                        return;
+                    }
+                }
+                read_dir_spec_iter.par_bridge().for_each_with(
+                    run_context,
+                    |run_context, ordered_read_dir_spec| {
+                        multi_threaded_walk_dir(ordered_read_dir_spec, run_context);
+                    },
+                );
+            });
+            if startup_rx.map_or(false, |(rx, duration)| rx.recv_timeout(duration).is_err()) {
+                return None;
+            }
             ReadDirIter::ParWalk {
                 read_dir_result_iter,
             }
         }
+        .into()
     }
 }
 

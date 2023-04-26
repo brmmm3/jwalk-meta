@@ -1,37 +1,55 @@
-# 0.8.3
+All notable changes to this project will be documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## 0.8.4
+
+Merge changes from jwalk original repo.
+
+### New Features
+
+ - re-export `rayon` in the crate root.
+   This makes creating a `ThreadPool` easier as it doesn't force us to
+   maintain our own `rayon` dependency.
+ - `Parallelism::RayonExistingPool::busy_timeout` is now optional.
+   That way we can indicate that no waiting should be done as we know the
+   given threadpool has enough resources.
+
+## 0.8.3
 
 Fix dependencies problems.
 Fix several typos.
 
-# 0.8.2
+## 0.8.2
 
 Update dependencies.
 
-# 0.8.1
+## 0.8.1
 
 Fix Windows issues.
 
-# 0.8.0
+## 0.8.0
 
 Fix clippy findings and make some methods of DirEntry public.
 
-# 0.7.1
+## 0.7.1
 
 Do not crash on file permission error.
 
-# 0.7.0
+## 0.7.0
 
 Added argument read_metadata und read_metadata_ext to method new.
 Extended DirEntry struct with optional MetaData and MetaDataExt.
 
-# 0.6.0
+## 0.6.0
 
 Added depth and path being read to params to ProcessReadDirFunction callback.
 
 Allow setting initial root_read_dir_state (ReadDirState) instead of always
 getting ::default() value.
 
-# 0.5.0
+## 0.5.0
 
 First major change is that API and behavior are now closer to [`walkdir`] and
 jwalk now runs the majority of `walkdir`s tests.

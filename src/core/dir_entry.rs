@@ -48,7 +48,7 @@ pub struct DirEntry<C: ClientState> {
 }
 
 impl<C: ClientState> DirEntry<C> {
-    pub fn from_entry(
+    pub(crate) fn from_entry(
         depth: usize,
         parent_path: Arc<Path>,
         metadata: Option<MetaData>,
@@ -84,7 +84,7 @@ impl<C: ClientState> DirEntry<C> {
     }
 
     // Only used for root and when following links.
-    pub fn from_path(
+    pub(crate) fn from_path(
         depth: usize,
         path: &Path,
         read_metadata: bool,
@@ -221,9 +221,9 @@ impl<C: ClientState> DirEntry<C> {
     /// [`std::fs::symlink_metadata`]: https://doc.rust-lang.org/stable/std/fs/fn.symlink_metadata.html
     pub fn metadata(&self) -> Result<fs::Metadata> {
         if self.follow_link {
-            fs::metadata(self.path())
+            fs::metadata(&self.path())
         } else {
-            fs::symlink_metadata(self.path())
+            fs::symlink_metadata(&self.path())
         }
         .map_err(|err| Error::from_entry(self, err))
     }
@@ -237,7 +237,9 @@ impl<C: ClientState> DirEntry<C> {
         &self,
         client_read_state: C::ReadDirState,
     ) -> Option<ReadDirSpec<C>> {
-        self.read_children_path.as_ref().map(|read_children_path| ReadDirSpec {
+        self.read_children_path
+            .as_ref()
+            .map(|read_children_path| ReadDirSpec {
                 depth: self.depth,
                 client_read_state,
                 path: read_children_path.clone(),
@@ -258,7 +260,7 @@ impl<C: ClientState> DirEntry<C> {
         )?;
 
         if dir_entry.file_type.is_dir() {
-            let target = std::fs::read_link(&path).unwrap();
+            let target = fs::read_link(&path).map_err(|err| Error::from_io(self.depth, err))?;
             for ancestor in self.follow_link_ancestors.iter().rev() {
                 if target.as_path() == ancestor.as_ref() {
                     return Err(Error::from_loop(

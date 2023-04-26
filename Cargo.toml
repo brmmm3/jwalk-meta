@@ -1,7 +1,7 @@
 [package]
 name = "jwalk"
 version = "0.8.3"
-authors = ["Jesse Grosjean <jesse@hogbaysoftware.com>", "Martin Bammer <mrbm74@gmail.com>"]
+authors = ["Jesse Grosjean <jesse@hogbaysoftware.com>", "Sebastian Thiel <byronimo@gmail.com>", "Martin Bammer <mrbm74@gmail.com>"]
 description = "Filesystem walk performed in parallel with streamed and sorted results."
 documentation = "https://docs.rs/jwalk/"
 homepage = "https://github.com/brmmm3/jwalk"

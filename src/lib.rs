@@ -41,7 +41,6 @@
 //!
 //! # fn try_main() -> Result<(), Error> {
 //! let walk_dir = WalkDirGeneric::<((usize),(bool))>::new("foo")
-
 //!     .process_read_dir(|depth, path, read_dir_state, children| {
 //!         // 1. Custom sort
 //!         children.sort_by(|a, b| match (a, b) {
@@ -128,6 +127,7 @@ use std::sync::Arc;
 use crate::core::{get_metadata_ext, ReadDir, ReadDirSpec};
 
 pub use crate::core::{DirEntry, DirEntryIter, Error, MetaData, MetaDataExt};
+pub use rayon;
 
 /// Builder for walking a directory.
 pub type WalkDir = WalkDirGeneric<((), ())>;
@@ -176,12 +176,25 @@ type ProcessReadDirFunction<C> = dyn Fn(Option<usize>, &Path, &mut <C as ClientS
 /// If you plan to perform lots of per file processing you might want to use Rayon to
 #[derive(Clone)]
 pub enum Parallelism {
-    /// Run on calling thread
+    /// Run on calling thread, similar to what happens in the `walkdir` crate.
     Serial,
-    /// Run in default rayon thread pool
-    RayonDefaultPool,
+    /// Run in default rayon thread pool.
+    RayonDefaultPool {
+        /// Define when we consider the rayon default pool too busy to serve our iteration and abort the iteration, defaulting to 1s.
+        ///
+        /// This can happen if `jwalk` is launched from within a par-iter on a pool that only has a single thread,
+        /// or if there are many parallel `jwalk` invocations that all use the same threadpool, rendering it too busy
+        /// to respond within this duration.
+        busy_timeout: std::time::Duration,
+    },
     /// Run in existing rayon thread pool
-    RayonExistingPool(Arc<ThreadPool>),
+    RayonExistingPool {
+        /// The pool to spawn our work onto.
+        pool: Arc<ThreadPool>,
+        /// Similar to [`Parallelism::RayonDefaultPool::busy_timeout`] if `Some`, but can be `None` to skip the deadlock check
+        /// in case you know that there is at least one free thread available on the pool.
+        busy_timeout: Option<std::time::Duration>,
+    },
     /// Run in new rayon thread pool with # threads
     RayonNewPool(usize),
 }
@@ -204,6 +217,10 @@ impl<C: ClientState> WalkDirGeneric<C> {
     /// path root. If root is a directory, then it is the first item yielded by
     /// the iterator. If root is a file, then it is the first and only item
     /// yielded by the iterator.
+    ///
+    /// Note that his iterator can fail on the first element if `into_iter()` is used as it
+    /// has to be infallible. Use [`try_into_iter()`][WalkDirGeneric::try_into_iter()]
+    /// instead for error handling.
     pub fn new<P: AsRef<Path>>(root: P) -> Self {
         WalkDirGeneric {
             root: root.as_ref().to_path_buf(),
@@ -215,10 +232,22 @@ impl<C: ClientState> WalkDirGeneric<C> {
                 follow_links: false,
                 read_metadata: false,
                 read_metadata_ext: false,
-                parallelism: Parallelism::RayonDefaultPool,
+                parallelism: Parallelism::RayonDefaultPool {
+                    busy_timeout: std::time::Duration::from_secs(1),
+                },
                 root_read_dir_state: C::ReadDirState::default(),
                 process_read_dir: None,
             },
+        }
+    }
+
+    /// Try to create an iterator or fail if the rayon threadpool (in any configuration) is busy.
+    pub fn try_into_iter(self) -> Result<DirEntryIter<C>> {
+        let iter = self.into_iter();
+        if iter.read_dir_iter.is_none() {
+            Err(Error::busy())
+        } else {
+            Ok(iter)
         }
     }
 
@@ -549,25 +578,33 @@ impl<C: ClientState> Clone for WalkDirOptions<C> {
 }
 
 impl Parallelism {
-    pub(crate) fn install<OP>(&self, op: OP)
+    pub(crate) fn spawn<OP>(&self, op: OP)
     where
-        OP: FnOnce() -> () + Send + 'static,
+        OP: FnOnce() + Send + 'static,
     {
         match self {
             Parallelism::Serial => op(),
-            Parallelism::RayonDefaultPool => rayon::spawn(op),
+            Parallelism::RayonDefaultPool { .. } => rayon::spawn(op),
             Parallelism::RayonNewPool(num_threads) => {
                 let mut thread_pool = ThreadPoolBuilder::new();
                 if *num_threads > 0 {
                     thread_pool = thread_pool.num_threads(*num_threads);
                 }
                 if let Ok(thread_pool) = thread_pool.build() {
-                    thread_pool.install(op);
+                    thread_pool.spawn(op);
                 } else {
                     rayon::spawn(op);
                 }
             }
-            Parallelism::RayonExistingPool(thread_pool) => thread_pool.install(op),
+            Parallelism::RayonExistingPool { pool, .. } => pool.spawn(op),
+        }
+    }
+
+    pub(crate) fn timeout(&self) -> Option<std::time::Duration> {
+        match self {
+            Parallelism::Serial | Parallelism::RayonNewPool(_) => None,
+            Parallelism::RayonDefaultPool { busy_timeout } => Some(*busy_timeout),
+            Parallelism::RayonExistingPool { busy_timeout, .. } => *busy_timeout,
         }
     }
 }

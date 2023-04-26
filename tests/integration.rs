@@ -2,9 +2,8 @@ use lazy_static::lazy_static;
 use rayon::iter::ParallelIterator;
 use rayon::prelude::*;
 use std::env;
-#[cfg(unix)]
 use std::fs;
-use std::path::{PathBuf, MAIN_SEPARATOR};
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 mod util;
@@ -268,7 +267,6 @@ fn siblings() {
     assert_eq!(expected, r.paths());
 }
 
-#[cfg(unix)]
 #[test]
 fn sym_root_file_nofollow() {
     let dir = Dir::tmp();
@@ -300,7 +298,6 @@ fn sym_root_file_nofollow() {
     assert!(!link.metadata().unwrap().is_dir());
 }
 
-#[cfg(unix)]
 #[test]
 fn sym_root_file_follow() {
     let dir = Dir::tmp();
@@ -333,7 +330,6 @@ fn sym_root_file_follow() {
     assert!(!link.metadata().unwrap().is_dir());
 }
 
-#[cfg(unix)]
 #[test]
 fn sym_root_dir_nofollow() {
     let dir = Dir::tmp();
@@ -370,7 +366,6 @@ fn sym_root_dir_nofollow() {
     assert!(!link_zzz.path_is_symlink());
 }
 
-#[cfg(unix)]
 #[test]
 fn sym_root_dir_follow() {
     let dir = Dir::tmp();
@@ -409,7 +404,6 @@ fn sym_root_dir_follow() {
     assert!(!link_zzz.path_is_symlink());
 }
 
-#[cfg(unix)]
 #[test]
 fn sym_file_nofollow() {
     let dir = Dir::tmp();
@@ -446,7 +440,6 @@ fn sym_file_nofollow() {
     assert!(!link.metadata().unwrap().is_dir());
 }
 
-#[cfg(unix)]
 #[test]
 fn sym_file_follow() {
     let dir = Dir::tmp();
@@ -483,7 +476,6 @@ fn sym_file_follow() {
     assert!(!link.metadata().unwrap().is_dir());
 }
 
-#[cfg(unix)]
 #[test]
 fn sym_dir_nofollow() {
     let dir = Dir::tmp();
@@ -521,7 +513,6 @@ fn sym_dir_nofollow() {
     assert!(!link.metadata().unwrap().is_dir());
 }
 
-#[cfg(unix)]
 #[test]
 fn sym_dir_follow() {
     let dir = Dir::tmp();
@@ -565,7 +556,6 @@ fn sym_dir_follow() {
     assert!(!link_zzz.path_is_symlink());
 }
 
-#[cfg(unix)]
 #[test]
 fn sym_noloop() {
     let dir = Dir::tmp();
@@ -580,7 +570,6 @@ fn sym_noloop() {
     assert_eq!(5, r.ents().len());
 }
 
-#[cfg(unix)]
 #[test]
 fn sym_loop_detect() {
     let dir = Dir::tmp();
@@ -606,7 +595,6 @@ fn sym_loop_detect() {
     assert!(err.io_error().is_none());
 }
 
-#[cfg(unix)]
 #[test]
 fn sym_self_loop_no_error() {
     let dir = Dir::tmp();
@@ -632,7 +620,6 @@ fn sym_self_loop_no_error() {
     assert!(!ent.metadata().unwrap().file_type().is_dir());
 }
 
-#[cfg(unix)]
 #[test]
 fn sym_file_self_loop_io_error() {
     let dir = Dir::tmp();
@@ -654,7 +641,6 @@ fn sym_file_self_loop_io_error() {
     assert!(err.io_error().is_some());
 }
 
-#[cfg(unix)]
 #[test]
 fn sym_dir_self_loop_io_error() {
     let dir = Dir::tmp();
@@ -745,24 +731,6 @@ fn max_depth_2() {
     assert_eq!(expected, r.paths());
 }
 
-/*
-// FIXME: This test seems wrong. It should return nothing!
-#[test]
-fn min_max_depth_diff_nada() {
-    let dir = Dir::tmp();
-    dir.mkdirp("a/b/c");
-
-    let wd = WalkDir::new(dir.path()).min_depth(3).max_depth(2);
-    let r = dir.run_recursive(wd);
-    r.assert_no_errors();
-
-    let expected = vec![
-        dir.join("a").join("b").join("c"),
-    ];
-    assert_eq!(expected, r.sorted_paths());
-}
-*/
-
 #[test]
 fn min_max_depth_diff_0() {
     let dir = Dir::tmp();
@@ -795,71 +763,6 @@ fn min_max_depth_diff_1() {
     assert_eq!(expected, r.paths());
 }
 
-/*
-#[test]
-fn contents_first() {
-    let dir = Dir::tmp();
-    dir.touch("a");
-
-    let wd = WalkDir::new(dir.path()).contents_first(true);
-    let r = dir.run_recursive(wd);
-    r.assert_no_errors();
-
-    let expected = vec![
-        dir.join("a"),
-        dir.path().to_path_buf(),
-    ];
-    assert_eq!(expected, r.paths());
-}
-
-#[test]
-fn skip_current_dir() {
-    let dir = Dir::tmp();
-    dir.mkdirp("foo/bar/baz");
-    dir.mkdirp("quux");
-
-    let mut paths = vec![];
-    let mut it = WalkDir::new(dir.path()).into_iter();
-    while let Some(result) = it.next() {
-        let ent = result.unwrap();
-        paths.push(ent.path().to_path_buf());
-        if ent.file_name() == "bar" {
-            it.skip_current_dir();
-        }
-    }
-    paths.sort();
-
-    let expected = vec![
-        dir.path().to_path_buf(),
-        dir.join("foo"),
-        dir.join("foo").join("bar"),
-        dir.join("quux"),
-    ];
-    assert_eq!(expected, paths);
-}
-
-#[test]
-fn filter_entry() {
-    let dir = Dir::tmp();
-    dir.mkdirp("foo/bar/baz/abc");
-    dir.mkdirp("quux");
-
-    let wd = WalkDir::new(dir.path())
-        .into_iter()
-        .filter_entry(|ent| ent.file_name() != "baz");
-    let r = dir.run_recursive(wd);
-    r.assert_no_errors();
-
-    let expected = vec![
-        dir.path().to_path_buf(),
-        dir.join("foo"),
-        dir.join("foo").join("bar"),
-        dir.join("quux"),
-    ];
-    assert_eq!(expected, r.sorted_paths());
-}
-*/
-
 #[test]
 fn sort() {
     let dir = Dir::tmp();
@@ -881,74 +784,6 @@ fn sort() {
     assert_eq!(expected, r.paths());
 }
 
-/*
-
-#[cfg(target_os = "linux")]
-#[test]
-fn same_file_system() {
-    use std::path::Path;
-
-    // This test is a little weird since it's not clear whether it's a good
-    // idea to setup a distinct mounted volume in these tests. Instead, we
-    // probe for an existing one.
-    if !Path::new("/sys").is_dir() {
-        return;
-    }
-
-    let dir = Dir::tmp();
-    dir.touch("a");
-    dir.symlink_dir("/sys", "sys-link");
-
-    // First, do a sanity check that things work without following symlinks.
-    let wd = WalkDir::new(dir.path());
-    let r = dir.run_recursive(wd);
-    r.assert_no_errors();
-
-    let expected = vec![
-        dir.path().to_path_buf(),
-        dir.join("a"),
-        dir.join("sys-link"),
-    ];
-    assert_eq!(expected, r.sorted_paths());
-
-    // ... now follow symlinks and ensure we don't descend into /sys.
-    let wd = WalkDir::new(dir.path())
-        .same_file_system(true)
-        .follow_links(true);
-    let r = dir.run_recursive(wd);
-    r.assert_no_errors();
-
-    let expected = vec![
-        dir.path().to_path_buf(),
-        dir.join("a"),
-        dir.join("sys-link"),
-    ];
-    assert_eq!(expected, r.sorted_paths());
-}
-
-// Tests that skip_current_dir doesn't destroy internal invariants.
-//
-// See: https://github.com/BurntSushi/walkdir/issues/118
-#[test]
-fn regression_skip_current_dir() {
-    let dir = Dir::tmp();
-    dir.mkdirp("foo/a/b");
-    dir.mkdirp("foo/1/2");
-
-    let mut wd = WalkDir::new(dir.path()).max_open(1).into_iter();
-    wd.next();
-    wd.next();
-    wd.next();
-    wd.next();
-
-    wd.skip_current_dir();
-    wd.skip_current_dir();
-    wd.next();
-}
-*/
-
-use fs_extra;
-
 fn test_dir() -> (PathBuf, tempfile::TempDir) {
     let template = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/assets/test_dir");
     let temp_dir = tempfile::tempdir().unwrap();
@@ -965,7 +800,10 @@ fn local_paths(walk_dir: WalkDir) -> Vec<String> {
         .into_iter()
         .map(|each_result| {
             let each_entry = each_result.unwrap();
-            let path = each_entry.path().to_path_buf();
+            if let Some(err) = each_entry.read_children_error.as_ref() {
+                panic!("should not encounter any child errors :{:?}", err);
+            }
+            let path = each_entry.path();
             let path = path.strip_prefix(&root).unwrap().to_path_buf();
             let mut path_string = path.to_str().unwrap().to_string();
             path_string.push_str(&format!(" ({})", each_entry.depth));
@@ -983,18 +821,18 @@ fn walk_serial() {
             .parallelism(Parallelism::Serial)
             .sort(true),
     );
-    assert!(
-        paths
-            == vec![
-                " (0)",
-                "a.txt (1)",
-                "b.txt (1)",
-                "c.txt (1)",
-                "group 1 (1)",
-                &format!("group 1{}d.txt (2)", MAIN_SEPARATOR),
-                "group 2 (1)",
-                &format!("group 2{}e.txt (2)", MAIN_SEPARATOR),
-            ]
+    assert_eq!(
+        paths,
+        vec![
+            " (0)",
+            "a.txt (1)",
+            "b.txt (1)",
+            "c.txt (1)",
+            "group 1 (1)",
+            "group 1/d.txt (2)",
+            "group 2 (1)",
+            "group 2/e.txt (2)",
+        ]
     );
 }
 
@@ -1006,18 +844,18 @@ fn sort_by_name_rayon_custom_2_threads() {
             .parallelism(Parallelism::RayonNewPool(2))
             .sort(true),
     );
-    assert!(
-        paths
-            == vec![
-                " (0)",
-                "a.txt (1)",
-                "b.txt (1)",
-                "c.txt (1)",
-                "group 1 (1)",
-                &format!("group 1{}d.txt (2)", MAIN_SEPARATOR),
-                "group 2 (1)",
-                &format!("group 2{}e.txt (2)", MAIN_SEPARATOR),
-            ]
+    assert_eq!(
+        paths,
+        vec![
+            " (0)",
+            "a.txt (1)",
+            "b.txt (1)",
+            "c.txt (1)",
+            "group 1 (1)",
+            "group 1/d.txt (2)",
+            "group 2 (1)",
+            "group 2/e.txt (2)",
+        ]
     );
 }
 
@@ -1025,24 +863,26 @@ fn sort_by_name_rayon_custom_2_threads() {
 fn walk_rayon_global() {
     let (test_dir, _temp_dir) = test_dir();
     let paths = local_paths(WalkDir::new(test_dir).sort(true));
-    assert!(
-        paths
-            == vec![
-                " (0)",
-                "a.txt (1)",
-                "b.txt (1)",
-                "c.txt (1)",
-                "group 1 (1)",
-                &format!("group 1{}d.txt (2)", MAIN_SEPARATOR),
-                "group 2 (1)",
-                &format!("group 2{}e.txt (2)", MAIN_SEPARATOR),
-            ]
+    assert_eq!(
+        paths,
+        vec![
+            " (0)",
+            "a.txt (1)",
+            "b.txt (1)",
+            "c.txt (1)",
+            "group 1 (1)",
+            "group 1/d.txt (2)",
+            "group 2 (1)",
+            "group 2/e.txt (2)",
+        ]
     );
 }
 
 #[test]
 fn walk_rayon_no_lockup() {
-    // Without jwalk_par_bridge this locks
+    // Without jwalk_par_bridge this locks (pre rayon 1.6.1)
+    // This test now passes without needing jwalk_par_bridge
+    // and that code has been removed from jwalk.
     let pool = std::sync::Arc::new(
         rayon::ThreadPoolBuilder::new()
             .num_threads(1)
@@ -1050,7 +890,10 @@ fn walk_rayon_no_lockup() {
             .unwrap(),
     );
     let _: Vec<_> = WalkDir::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
-        .parallelism(Parallelism::RayonExistingPool(pool))
+        .parallelism(Parallelism::RayonExistingPool {
+            pool,
+            busy_timeout: std::time::Duration::from_millis(500).into(),
+        })
         .process_read_dir(|_, _, _, dir_entry_results| {
             for dir_entry_result in dir_entry_results {
                 let _ = dir_entry_result
@@ -1064,9 +907,21 @@ fn walk_rayon_no_lockup() {
 }
 
 #[test]
-fn combine_rayon_no_lockup() {
+fn combine_with_rayon_no_lockup_1() {
+    // only run this test if linux_checkout present
+    let linux_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benches/assets/linux_checkout");
+    if linux_dir.exists() {
+        rayon::scope(|_| {
+            eprintln!("WalkDir…");
+            for _entry in WalkDir::new(linux_dir) {}
+            eprintln!("WalkDir completed");
+        });
+    }
+}
+
+#[test]
+fn combine_with_rayon_no_lockup_2() {
     WalkDir::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
-        .parallelism(Parallelism::RayonNewPool(0)) // lockup if don't use separate rayon pool
         .sort(true)
         .into_iter()
         .par_bridge()
@@ -1084,7 +939,6 @@ fn combine_rayon_no_lockup() {
         .count();
 }
 
-#[cfg(unix)]
 #[test]
 fn see_hidden_files() {
     let (test_dir, _temp_dir) = test_dir();
@@ -1097,7 +951,10 @@ fn walk_file() {
     let (test_dir, _temp_dir) = test_dir();
     let walk_dir = WalkDir::new(test_dir.join("a.txt"));
     let mut iter = walk_dir.into_iter();
-    assert!(iter.next().unwrap().unwrap().file_name.to_str().unwrap() == "a.txt");
+    assert_eq!(
+        iter.next().unwrap().unwrap().file_name.to_str().unwrap(),
+        "a.txt"
+    );
     assert!(iter.next().is_none());
 }
 
@@ -1106,7 +963,10 @@ fn walk_file_serial() {
     let (test_dir, _temp_dir) = test_dir();
     let walk_dir = WalkDir::new(test_dir.join("a.txt")).parallelism(Parallelism::Serial);
     let mut iter = walk_dir.into_iter();
-    assert!(iter.next().unwrap().unwrap().file_name.to_str().unwrap() == "a.txt");
+    assert_eq!(
+        iter.next().unwrap().unwrap().file_name.to_str().unwrap(),
+        "a.txt"
+    );
     assert!(iter.next().is_none());
 }
 
@@ -1131,13 +991,13 @@ fn error_when_path_removed_durring_iteration() {
     let _ = iter.next().unwrap().is_ok(); // " (0)",
 
     // Remove group 2 dir from disk
-    fs_extra::remove_items(&vec![test_dir.join("group 2")]).unwrap();
+    fs_extra::remove_items(&[test_dir.join("group 2")]).unwrap();
 
     let _ = iter.next().unwrap().is_ok(); // "a.txt (1)",
     let _ = iter.next().unwrap().is_ok(); // "b.txt (1)",
     let _ = iter.next().unwrap().is_ok(); // "c.txt (1)",
     let _ = iter.next().unwrap().is_ok(); // "group 1 (1)",
-    let _ = iter.next().unwrap().is_ok(); // &format!("group 1{}d.txt (2)", MAIN_SEPARATOR),
+    let _ = iter.next().unwrap().is_ok(); // "group 1/d.txt (2)",
 
     // group 2 is read correctly, since it was read before path removed.
     let group_2 = iter.next().unwrap().unwrap();
@@ -1158,7 +1018,7 @@ fn walk_root() {
         .into_iter()
         .filter_map(|each| Some(each.ok()?.path()))
         .collect();
-    assert!(paths.first().unwrap().to_str().unwrap() == "/");
+    assert_eq!(paths.first().unwrap().to_str().unwrap(), "/");
 }
 
 lazy_static! {
@@ -1182,9 +1042,9 @@ fn walk_relative_1() {
             "b.txt (1)",
             "c.txt (1)",
             "group 1 (1)",
-            &format!("group 1{}d.txt (2)", MAIN_SEPARATOR),
+            "group 1/d.txt (2)",
             "group 2 (1)",
-            &format!("group 2{}e.txt (2)", MAIN_SEPARATOR),
+            "group 2/e.txt (2)",
         ]
     );
 
@@ -1209,9 +1069,9 @@ fn walk_relative_2() {
             "b.txt (1)",
             "c.txt (1)",
             "group 1 (1)",
-            &format!("group 1{}d.txt (2)", MAIN_SEPARATOR),
+            "group 1/d.txt (2)",
             "group 2 (1)",
-            &format!("group 2{}e.txt (2)", MAIN_SEPARATOR),
+            "group 2/e.txt (2)",
         ]
     );
 
@@ -1237,7 +1097,7 @@ fn filter_groups_with_process_read_dir() {
                 });
             }),
     );
-    assert!(paths == vec![" (0)", "a.txt (1)", "b.txt (1)", "c.txt (1)",]);
+    assert_eq!(paths, vec![" (0)", "a.txt (1)", "b.txt (1)", "c.txt (1)",]);
 }
 
 #[test]
@@ -1257,16 +1117,16 @@ fn filter_group_children_with_process_read_dir() {
                 });
             }),
     );
-    assert!(
-        paths
-            == vec![
-                " (0)",
-                "a.txt (1)",
-                "b.txt (1)",
-                "c.txt (1)",
-                "group 1 (1)",
-                "group 2 (1)",
-            ]
+    assert_eq!(
+        paths,
+        vec![
+            " (0)",
+            "a.txt (1)",
+            "b.txt (1)",
+            "c.txt (1)",
+            "group 1 (1)",
+            "group 2 (1)",
+        ]
     );
 }
 
@@ -1281,38 +1141,3 @@ fn test_read_linux() {
         }
     }
 }
-
-/*
-#[test]
-fn save_state_with_process_read_dir() {
-    let (test_dir, _temp_dir) = test_dir();
-
-    // Test that both parent client state and children client state can be set
-    // from process_read_dir callback.
-    let mut iter = WalkDirGeneric::<(usize, usize)>::new(test_dir)
-        .sort(true)
-        .process_read_dir(|parent_branch_state, children| {
-            *parent_branch_state += children.len();
-            children.iter_mut().for_each(|each_result| {
-                if let Ok(each) = each_result {
-                    if each.file_type.is_dir() {
-                        client_state += 1;
-                    }
-                    each.client_state = *parent_branch_state;
-                    each.client_state = 1;
-                }
-            });
-        })
-        .into_iter();
-
-    assert!(iter.next().unwrap().unwrap().client_state == 6); // " (0)"
-    assert!(iter.next().unwrap().unwrap().client_state == 1); // "a.txt (1)"
-    assert!(iter.next().unwrap().unwrap().client_state == 1); // "b.txt (1)"
-    assert!(iter.next().unwrap().unwrap().client_state == 1); // "c.txt (1)"
-    assert!(iter.next().unwrap().unwrap().client_state == 2); // "group 1 (1)",
-    assert!(iter.next().unwrap().unwrap().client_state == 1); // &format!("group 1{}d.txt (2)", MAIN_SEPARATOR),
-    assert!(iter.next().unwrap().unwrap().client_state == 2); // "group 2 (1)",
-    assert!(iter.next().unwrap().unwrap().client_state == 1); // &format!("group 2{}e.txt (2)", MAIN_SEPARATOR),
-    assert!(iter.next().is_none());
-}
-*/
