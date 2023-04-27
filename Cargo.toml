@@ -1,11 +1,11 @@
 [package]
-name = "jwalk"
-version = "0.8.3"
+name = "jwalk-meta"
+version = "0.9.0"
 authors = ["Jesse Grosjean <jesse@hogbaysoftware.com>", "Sebastian Thiel <byronimo@gmail.com>", "Martin Bammer <mrbm74@gmail.com>"]
 description = "Filesystem walk performed in parallel with streamed and sorted results."
-documentation = "https://docs.rs/jwalk/"
-homepage = "https://github.com/brmmm3/jwalk"
-repository = "https://github.com/brmmm3/jwalk"
+documentation = "https://docs.rs/jwalk-meta/"
+homepage = "https://github.com/brmmm3/jwalk-meta"
+repository = "https://github.com/brmmm3/jwalk-meta"
 readme = "README.md"
 keywords = ["directory", "recursive", "walk", "iterator", "parallel"]
 categories = ["filesystem", "concurrency"]
@@ -13,7 +13,7 @@ license = "MIT"
 edition = "2021"
 
 [badges]
-travis-ci = { repository = "brmmm3/jwalk" }
+travis-ci = { repository = "brmmm3/jwalk-meta" }
 
 [dependencies]
 rayon = "1.6"

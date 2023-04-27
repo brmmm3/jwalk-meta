@@ -1,4 +1,4 @@
-use jwalk::WalkDir;
+use jwalk_meta::WalkDir;
 use rayon::prelude::*;
 
 #[test]
@@ -7,12 +7,12 @@ fn works() {
         .num_threads(1)
         .build_global()
         .expect("Failed to initialize worker thread pool");
-    // Does not finish if jwalk uses shared pool with 1 thread, but we can detect this issue and signal this with an error.
+    // Does not finish if jwalk_meta uses shared pool with 1 thread, but we can detect this issue and signal this with an error.
     (0..=1)
         .collect::<Vec<usize>>()
         .par_iter()
         .for_each(|round| {
-            let generic = WalkDir::new(".").parallelism(jwalk::Parallelism::RayonDefaultPool {
+            let generic = WalkDir::new(".").parallelism(jwalk_meta::Parallelism::RayonDefaultPool {
                 busy_timeout: std::time::Duration::from_millis(10),
             });
             if *round == 0 {

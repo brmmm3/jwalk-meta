@@ -1,5 +1,5 @@
-jwalk
-=======
+jwalk-meta
+==========
 
 Filesystem walk.
 
@@ -7,8 +7,10 @@ Filesystem walk.
 - Entries streamed in sorted order
 - Custom sort/filter/skip/state
 
-[![Build Status](https://travis-ci.org/brmmm3/jwalk.svg?branch=master)](https://travis-ci.org/jessegrosjean/jwalk)
-[![Latest version](http://meritbadge.herokuapp.com/jwalk)](https://crates.io/crates/jwalk)
+This is a fork of [https://github.com/Byron/jwalk](https://github.com/Byron/jwalk). This project adds optional collecting metadata to improve performance if metadata is needed later.
+
+[![Build Status](https://travis-ci.org/brmmm3/jwalk-meta.svg?branch=master)](https://travis-ci.org/brmmm3/jwalk-meta)
+[![Latest version](http://meritbadge.herokuapp.com/jwalk-meta)](https://crates.io/crates/jwalk-meta)
 
 ### Usage
 
@@ -16,17 +18,17 @@ Add this to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-jwalk = "0.8"
+jwalk-meta = "0.9"
 ```
 
-Lean More: [docs.rs/jwalk](https://docs.rs/jwalk)
+Lean More: [docs.rs/jwalk-meta](https://docs.rs/jwalk-meta)
 
 ### Example
 
 Recursively iterate over the "foo" directory sorting by name:
 
 ```rust
-use jwalk::{WalkDir};
+use jwalk_meta::{WalkDir};
 
 for entry in WalkDir::new("foo").sort(true) {
   println!("{}", entry?.path().display());
@@ -59,5 +61,5 @@ single directory with many files.
 
 ### Benchmarks
 
-[Benchmarks](https://github.com/brmmm3/jwalk/blob/master/benches/benchmarks.md)
+[Benchmarks](https://github.com/brmmm3/jwalk-meta/blob/master/benches/benchmarks.md)
 comparing this crate with `walkdir` and `ignore`.

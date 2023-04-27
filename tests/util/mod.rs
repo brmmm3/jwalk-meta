@@ -5,7 +5,7 @@ use std::io::{self};
 use std::path::{Path, PathBuf};
 use std::result;
 
-use jwalk::*;
+use jwalk_meta::*;
 
 /// Create an error from a format!-like syntax.
 #[macro_export]

@@ -8,7 +8,7 @@ use std::sync::Mutex;
 
 mod util;
 
-use jwalk::*;
+use jwalk_meta::*;
 use util::Dir;
 
 #[test]
@@ -882,7 +882,7 @@ fn walk_rayon_global() {
 fn walk_rayon_no_lockup() {
     // Without jwalk_par_bridge this locks (pre rayon 1.6.1)
     // This test now passes without needing jwalk_par_bridge
-    // and that code has been removed from jwalk.
+    // and that code has been removed from jwalk_meta.
     let pool = std::sync::Arc::new(
         rayon::ThreadPoolBuilder::new()
             .num_threads(1)

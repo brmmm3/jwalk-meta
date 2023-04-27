@@ -1,8 +1,8 @@
 use std::time::Instant;
 
-extern crate jwalk;
+extern crate jwalk_meta;
 
-use jwalk::{Parallelism, WalkDirGeneric};
+use jwalk_meta::{Parallelism, WalkDirGeneric};
 use std::env;
 
 fn main() {

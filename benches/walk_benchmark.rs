@@ -17,7 +17,7 @@ use rayon::prelude::*;
 use tar::Archive;
 use walkdir;
 
-use jwalk::{Error, Parallelism, WalkDir, WalkDirGeneric};
+use jwalk_meta::{Error, Parallelism, WalkDir, WalkDirGeneric};
 
 #[cfg(unix)]
 fn linux_kernel_archive() -> PathBuf {

@@ -13,7 +13,7 @@
 //!
 //! ```no_run
 //! # use std::io::Error;
-//! use jwalk::{WalkDir};
+//! use jwalk_meta::{WalkDir};
 //!
 //! # fn try_main() -> Result<(), Error> {
 //! for entry in WalkDir::new("foo").sort(true) {
@@ -37,7 +37,7 @@
 //! ```no_run
 //! # use std::io::Error;
 //! use std::cmp::Ordering;
-//! use jwalk::{ WalkDirGeneric };
+//! use jwalk_meta::{ WalkDirGeneric };
 //!
 //! # fn try_main() -> Result<(), Error> {
 //! let walk_dir = WalkDirGeneric::<((usize),(bool))>::new("foo")
@@ -182,8 +182,8 @@ pub enum Parallelism {
     RayonDefaultPool {
         /// Define when we consider the rayon default pool too busy to serve our iteration and abort the iteration, defaulting to 1s.
         ///
-        /// This can happen if `jwalk` is launched from within a par-iter on a pool that only has a single thread,
-        /// or if there are many parallel `jwalk` invocations that all use the same threadpool, rendering it too busy
+        /// This can happen if `jwalk_meta` is launched from within a par-iter on a pool that only has a single thread,
+        /// or if there are many parallel `jwalk_meta` invocations that all use the same threadpool, rendering it too busy
         /// to respond within this duration.
         busy_timeout: std::time::Duration,
     },
