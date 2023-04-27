@@ -84,7 +84,7 @@ impl<C: ClientState> DirEntry<C> {
     }
 
     // Only used for root and when following links.
-    pub(crate) fn from_path(
+    pub fn from_path(
         depth: usize,
         path: &Path,
         read_metadata: bool,
