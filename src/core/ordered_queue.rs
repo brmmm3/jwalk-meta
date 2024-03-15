@@ -2,8 +2,7 @@
 
 use crossbeam::channel::{self, Receiver, SendError, Sender, TryRecvError};
 use std::collections::BinaryHeap;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 use std::thread;
 
 use super::*;

@@ -117,7 +117,6 @@ mod core;
 
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::cmp::Ordering;
-use std::default::Default;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::fs;

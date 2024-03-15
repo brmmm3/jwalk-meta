@@ -1,5 +1,4 @@
 use lazy_static::lazy_static;
-use rayon::iter::ParallelIterator;
 use rayon::prelude::*;
 use std::env;
 use std::fs;
