@@ -3,6 +3,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-10-25
+
+### Added
+
+- Add native Windows directory enumeration using `NtQueryDirectoryFileEx`, with streaming subdirectory dispatch and priority-based scheduling while preserving ordered output.
+- Add a Linux `getdents64` directory-reading path with optional batched `STATX` metadata retrieval via `io_uring` for supported network filesystems. The `legacy-read-dir` feature retains the standard-library fallback.
+- Expose Linux file birth times from `statx`, including support for CIFS mounts that do not provide Unix extensions.
+- Add automatic retries for transient I/O errors.
+
+### Improved
+
+- Reduce redundant system calls and improve performance when collecting extended metadata, including hard-link and volume information.
+- Detect filesystem types and select an appropriate synchronous or asynchronous Linux I/O strategy, falling back safely when needed.
+
+### Fixed
+
+- Restrict Linux `statx` and `io_uring` support to compatible GNU targets and supported architectures, including fixes for musl and 32-bit libc builds.
+- Fix Linux build issues and filesystem-specific metadata handling.
+
 ## [1.0.8] - 2026-06-24
 
 ### Fixed
@@ -11,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `process_read_dir` now moved instead of cloned (avoids spurious `Arc` refcount bump);
   root path `Arc<Path>` constructed from `&Path` directly, eliminating a redundant `PathBuf` deep copy.
 - Reduce reference-count churn and transient memory ownership during walk initialization.
+
 ## [0.9.4] - 2024-04-01
 
 ### Improved

@@ -74,10 +74,7 @@ impl<C: ClientState> DirEntryIter<C> {
             Some(result) => result,
             None => return Err(Error::busy()),
         };
-        let read_dir = match read_dir_result {
-            Ok(read_dir) => read_dir,
-            Err(err) => return Err(err),
-        };
+        let read_dir = read_dir_result?;
 
         let ReadDir { results_list, .. } = read_dir;
         results.push(results_list.into_iter());

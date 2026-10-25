@@ -709,7 +709,7 @@ impl Parallelism {
                 // 线程池随宿主线程生命周期销毁，rayon::ThreadPool::drop 会
                 // 等待所有工作线程完成后才释放资源。
                 thread_local! {
-                    static TLS_POOL: std::cell::RefCell<Option<rayon::ThreadPool>> = std::cell::RefCell::new(None);
+                    static TLS_POOL: std::cell::RefCell<Option<rayon::ThreadPool>> = const { std::cell::RefCell::new(None) };
                 }
                 TLS_POOL.with(|cell| {
                     let mut pool_opt = cell.borrow_mut();
@@ -1177,7 +1177,7 @@ fn read_dir_unix<C: ClientState>(
     // Linux + 未启用 legacy feature：走 getdents64 直调路径
     #[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
     {
-        return read_dir_linux_via_getdents(
+        read_dir_linux_via_getdents(
             path,
             read_dir_depth,
             read_dir_contents_depth,
@@ -1192,7 +1192,7 @@ fn read_dir_unix<C: ClientState>(
             process_read_dir,
             streaming_ctx,
             dir_entry_capacity,
-        );
+        )
     }
 
     // 其他情况（非 Linux 或开启 legacy-read-dir feature）：保留 fs::read_dir 路径
@@ -1601,18 +1601,18 @@ fn make_dir_entry_linux<C: ClientState>(
                             // POSIX stat lacks birth time (stx_btime needs statx(2)).
                             created: None,
                             // POSIX change time always present in stat (same source as st_mtime).
-                            changed: time_to_systemtime(stat.st_ctime, stat.st_ctime_nsec as i64),
-                            modified: time_to_systemtime(stat.st_mtime, stat.st_mtime_nsec as i64),
-                            accessed: time_to_systemtime(stat.st_atime, stat.st_atime_nsec as i64),
+                            changed: time_to_systemtime(stat.st_ctime, stat.st_ctime_nsec),
+                            modified: time_to_systemtime(stat.st_mtime, stat.st_mtime_nsec),
+                            accessed: time_to_systemtime(stat.st_atime, stat.st_atime_nsec),
                             permissions: Some(std::fs::Permissions::from_mode(mode)),
                         });
                     }
                     if read_metadata_ext {
                         entry_metadata_ext = Some(MetaDataExt {
                             st_mode: stat.st_mode,
-                            st_ino: stat.st_ino as u64,
+                            st_ino: stat.st_ino,
                             st_dev: stat.st_dev,
-                            st_nlink: stat.st_nlink as u64,
+                            st_nlink: stat.st_nlink,
                             st_blksize: stat.st_blksize as u64,
                             st_blocks: stat.st_blocks as u64,
                             st_uid: stat.st_uid,

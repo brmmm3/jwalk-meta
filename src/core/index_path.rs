@@ -47,7 +47,7 @@ impl Eq for IndexPath {}
 
 impl PartialOrd for IndexPath {
     fn partial_cmp(&self, o: &Self) -> Option<Ordering> {
-        o.indices.partial_cmp(&self.indices)
+        Some(self.cmp(o))
     }
 }
 

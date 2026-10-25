@@ -8,8 +8,9 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc;
+use std::hint::black_box;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{criterion_group, criterion_main, Criterion};
 use flate2::read::GzDecoder;
 use ignore::WalkBuilder;
 use num_cpus;

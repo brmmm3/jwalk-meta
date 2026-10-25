@@ -156,7 +156,7 @@ fn strategy_from_ftype(f_type: i64) -> IoStrategy {
 /// io_uring 的优势来自流水线化 N 个请求的等待时间：
 /// - RTT ≈ 0.1ms（loopback）：串行 N×0.1ms ≈ io_uring 1×0.1ms，差距可忽略，io_uring 额外开销反而更慢
 /// - RTT ≈ 5ms（真实 SMB）：串行 N×5ms >> io_uring 1×5ms，收益显著
-/// 1ms 是经验分界线：低于此阈值 io_uring 无收益。
+///   1ms 是经验分界线：低于此阈值 io_uring 无收益。
 const LATENCY_THRESHOLD: std::time::Duration = std::time::Duration::from_micros(1000);
 
 /// 对网络挂载路径做一次 fstatat 探测延迟。

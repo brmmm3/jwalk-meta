@@ -127,7 +127,7 @@ where
             let looking_for = &self.ordered_matcher.looking_for;
             let top_matches = self.receive_buffer
                 .peek()
-                .map_or(false, |top| top.index_path.eq(looking_for));
+                .is_some_and(|top| top.index_path.eq(looking_for));
             if !top_matches {
                 self.drain_channel();
             }

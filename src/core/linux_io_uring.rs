@@ -115,10 +115,7 @@ pub fn batch_statx_via_io_uring(
         let chunk_end = (chunk_start + RING_SIZE as usize).min(entries.len());
         let chunk = &mut entries[chunk_start..chunk_end];
         // 单批失败不影响已完成的批；但 record 错误让调用方知道整体不完整
-        if let Err(e) = batch_statx_chunk(chunk, dirfd) {
-            // 即便某批失败，已完成的批的 statx 已写入；继续尝试下一批无意义（同样错误）
-            return Err(e);
-        }
+        batch_statx_chunk(chunk, dirfd)?;
     }
     Ok(())
 }
@@ -166,8 +163,8 @@ fn batch_statx_chunk(
             // SAFETY: types::statx 是 0 字节不透明占位符，SQE 只传指针值给内核。
             statx_bufs[local_idx].as_mut_ptr() as *mut types::statx,
         )
-        .flags(libc::AT_SYMLINK_NOFOLLOW as i32)
-        .mask((libc::STATX_BASIC_STATS | libc::STATX_BTIME) as u32)
+        .flags(libc::AT_SYMLINK_NOFOLLOW)
+        .mask(libc::STATX_BASIC_STATS | libc::STATX_BTIME)
         .build()
         .user_data(local_idx as u64);
 
@@ -218,7 +215,6 @@ mod tests {
     use std::ffi::OsString;
     use std::fs;
     use std::os::unix::fs::MetadataExt;
-    use std::path::PathBuf;
 
     /// 构造一个最小的 LinuxDirEntryOwned（仅 d_type + name，statx=None）
     fn make_entry(d_type: u8, name: &str) -> LinuxDirEntryOwned {
