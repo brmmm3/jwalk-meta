@@ -1,4 +1,4 @@
-use std::mem::{size_of, offset_of};
+use std::mem::{offset_of, size_of};
 
 #[repr(C)]
 #[allow(non_snake_case)]
@@ -21,13 +21,28 @@ struct FILE_ID_BOTH_DIR_INFO {
 }
 
 fn main() {
-    println!("size_of::<FILE_ID_BOTH_DIR_INFO>(): {}", size_of::<FILE_ID_BOTH_DIR_INFO>());
-    println!("offset_of FileName: {}", offset_of!(FILE_ID_BOTH_DIR_INFO, FileName));
+    println!(
+        "size_of::<FILE_ID_BOTH_DIR_INFO>(): {}",
+        size_of::<FILE_ID_BOTH_DIR_INFO>()
+    );
+    println!(
+        "offset_of FileName: {}",
+        offset_of!(FILE_ID_BOTH_DIR_INFO, FileName)
+    );
     println!("size_of - 2 = {}", size_of::<FILE_ID_BOTH_DIR_INFO>() - 2);
-    println!("offset_of FileId: {}", offset_of!(FILE_ID_BOTH_DIR_INFO, FileId));
-    println!("offset_of ShortName: {}", offset_of!(FILE_ID_BOTH_DIR_INFO, ShortName));
-    println!("offset_of ShortNameLength: {}", offset_of!(FILE_ID_BOTH_DIR_INFO, ShortNameLength));
-    
+    println!(
+        "offset_of FileId: {}",
+        offset_of!(FILE_ID_BOTH_DIR_INFO, FileId)
+    );
+    println!(
+        "offset_of ShortName: {}",
+        offset_of!(FILE_ID_BOTH_DIR_INFO, ShortName)
+    );
+    println!(
+        "offset_of ShortNameLength: {}",
+        offset_of!(FILE_ID_BOTH_DIR_INFO, ShortNameLength)
+    );
+
     // Windows C struct layout (for reference)
     // NextEntryOffset: 0 (4)
     // FileIndex: 4 (4)

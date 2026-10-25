@@ -61,10 +61,7 @@ fn permission_denied_file() {
     let r = dir.run_recursive(wd);
 
     // The file should still be found (its name is readable), but metadata retrieval may fail.
-    assert!(
-        r.ents().len() >= 3,
-        "expected >= 3 entries including root"
-    );
+    assert!(r.ents().len() >= 3, "expected >= 3 entries including root");
 
     // Restore permissions.
     std::fs::set_permissions(
@@ -128,5 +125,8 @@ fn non_existent_path_error() {
     let r = dir.run_recursive(wd);
 
     assert!(!r.errs().is_empty(), "expected error for non-existent path");
-    assert!(r.ents().is_empty(), "expected no entries for non-existent path");
+    assert!(
+        r.ents().is_empty(),
+        "expected no entries for non-existent path"
+    );
 }

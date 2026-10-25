@@ -6,11 +6,11 @@
 //! In stdlib imported code, warnings are allowed.
 
 use std::fs::{self, Permissions};
-use std::path::Path;
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -219,5 +219,3 @@ pub struct MetaDataExt {
     /// File index (inode equivalent on NTFS/ReFS), may be `None` if not available
     pub file_index: Option<u64>,
 }
-
-

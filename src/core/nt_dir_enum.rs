@@ -11,16 +11,14 @@ use std::path::Path;
 use std::{io, ptr};
 
 use winapi::shared::ntdef::{HANDLE, LPCWSTR};
-use winapi::um::fileapi::{
-    CreateFileW, OPEN_EXISTING,
-};
+use winapi::um::fileapi::GetVolumeInformationByHandleW;
+use winapi::um::fileapi::{CreateFileW, OPEN_EXISTING};
 use winapi::um::handleapi::{CloseHandle, INVALID_HANDLE_VALUE};
 use winapi::um::libloaderapi::{GetProcAddress, LoadLibraryW};
 use winapi::um::winbase::FILE_FLAG_BACKUP_SEMANTICS;
 use winapi::um::winnt::{
     FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
-use winapi::um::fileapi::GetVolumeInformationByHandleW;
 
 /// 64 KB I/O buffer for NtQueryDirectoryFileEx to reduce syscall count.
 /// 64 KB is sufficient for local disks (microsecond-scale latency per syscall).
@@ -303,10 +301,7 @@ fn open_dir_handle(path: &Path) -> io::Result<HandleGuard> {
 /// Call the `on_entry` callback for each entry other than "." and "..".
 ///
 /// SAFETY: The caller must ensure that buffer contains valid data returned by the NT API.
-fn parse_buffer_entries(
-    buffer: &[u8],
-    mut on_entry: impl FnMut(&FILE_ID_BOTH_DIR_INFO, OsString),
-) {
+fn parse_buffer_entries(buffer: &[u8], mut on_entry: impl FnMut(&FILE_ID_BOTH_DIR_INFO, OsString)) {
     let mut offset: usize = 0;
     let buf_len = buffer.len();
     loop {
@@ -369,7 +364,9 @@ fn enumerate_dir_core(
     on_entry: impl FnMut(&FILE_ID_BOTH_DIR_INFO, OsString),
 ) -> io::Result<()> {
     let mut buffer = TLS_BUFFER.with(|b| {
-        b.borrow_mut().take().unwrap_or_else(|| vec![0u8; BUFFER_SIZE])
+        b.borrow_mut()
+            .take()
+            .unwrap_or_else(|| vec![0u8; BUFFER_SIZE])
     });
 
     let result = enumerate_dir_core_inner(guard, funcs, &mut buffer, on_entry);
@@ -614,13 +611,13 @@ pub fn detect_fs_type_and_vol_serial(dir_handle: &HandleGuard) -> (FsType, Optio
     let success = unsafe {
         GetVolumeInformationByHandleW(
             dir_handle.handle(),
-            ptr::null_mut(),               // lpVolumeNameBuffer
-            0,                             // nVolumeNameLength
-            &mut volume_serial,            // lpVolumeSerialNumber
-            ptr::null_mut(),               // lpMaximumComponentLength
-            ptr::null_mut(),               // lpFileSystemFlags
-            fs_name_buf.as_mut_ptr(),      // lpFileSystemNameBuffer
-            fs_name_buf.len() as u32,      // nFileSystemNameLength
+            ptr::null_mut(),          // lpVolumeNameBuffer
+            0,                        // nVolumeNameLength
+            &mut volume_serial,       // lpVolumeSerialNumber
+            ptr::null_mut(),          // lpMaximumComponentLength
+            ptr::null_mut(),          // lpFileSystemFlags
+            fs_name_buf.as_mut_ptr(), // lpFileSystemNameBuffer
+            fs_name_buf.len() as u32, // nFileSystemNameLength
         )
     };
 
@@ -629,7 +626,10 @@ pub fn detect_fs_type_and_vol_serial(dir_handle: &HandleGuard) -> (FsType, Optio
     }
 
     // Find the null terminator.
-    let len = fs_name_buf.iter().position(|&c| c == 0).unwrap_or(fs_name_buf.len());
+    let len = fs_name_buf
+        .iter()
+        .position(|&c| c == 0)
+        .unwrap_or(fs_name_buf.len());
     let fs_name = OsString::from_wide(&fs_name_buf[..len]);
     // Compare as ASCII (Windows filesystem names are always ASCII uppercase).
     let fs_type = match fs_name.to_string_lossy().as_ref() {
@@ -637,7 +637,7 @@ pub fn detect_fs_type_and_vol_serial(dir_handle: &HandleGuard) -> (FsType, Optio
         "ReFS" => FsType::Refs,
         "FAT32" => FsType::Fat32,
         "exFAT" => FsType::ExFat,
-        "FAT" => FsType::Fat32,   // FAT12/FAT16 also do not support hard links.
+        "FAT" => FsType::Fat32, // FAT12/FAT16 also do not support hard links.
         "FAT16" => FsType::Fat32, // Same as above.
         _ => FsType::Unknown,
     };
@@ -670,5 +670,3 @@ impl FsType {
         matches!(self, FsType::Fat32 | FsType::ExFat)
     }
 }
-
-

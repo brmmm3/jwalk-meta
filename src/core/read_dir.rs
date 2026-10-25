@@ -1,4 +1,4 @@
-use super::{ClientState, DirEntry, IndexPath, Weighted, ReadDirSpec};
+use super::{ClientState, DirEntry, IndexPath, ReadDirSpec, Weighted};
 use crate::Result;
 
 /// Results of successfully reading a directory.
@@ -54,7 +54,11 @@ impl<C: ClientState> ReadDir<C> {
                 .and_then(|e| e.read_children_spec(self.read_dir_state.clone()))
             {
                 if subdir_counter >= skip {
-                    specs.push(Weighted::new(spec, index_path.adding(subdir_counter), weight));
+                    specs.push(Weighted::new(
+                        spec,
+                        index_path.adding(subdir_counter),
+                        weight,
+                    ));
                 }
                 subdir_counter += 1;
             }

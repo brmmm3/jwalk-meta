@@ -59,9 +59,7 @@ fn alternating_parallelism_no_crash() {
         } else {
             Parallelism::RayonNewPool(2)
         };
-        let wd = WalkDir::new(dir.path())
-            .parallelism(parallelism)
-            .sort(true);
+        let wd = WalkDir::new(dir.path()).parallelism(parallelism).sort(true);
         let r = dir.run_recursive(wd);
         r.assert_no_errors();
     }

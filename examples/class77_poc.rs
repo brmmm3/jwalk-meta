@@ -1,4 +1,3 @@
-
 //! Proof of concept for using class 77 (FileStatBasicInformation) with NtQueryDirectoryFileEx directory enumeration.
 //!
 //! Goal: verify whether the class 77 buffer contains a LinkCount field.
@@ -7,7 +6,6 @@
 //!           infer the entry header size, and analyze the field layout.
 //!
 //! Does not modify production code under src/ or add dependencies; dynamically loads ntdll.
-
 
 use std::env;
 use std::ffi::OsString;
@@ -183,7 +181,8 @@ fn load_query_by_name() -> Option<NtQueryInformationByNameFn> {
     if module.is_null() {
         return None;
     }
-    let proc = unsafe { GetProcAddress(module, b"NtQueryInformationByName\0".as_ptr() as *const i8) };
+    let proc =
+        unsafe { GetProcAddress(module, b"NtQueryInformationByName\0".as_ptr() as *const i8) };
     if proc.is_null() {
         None
     } else {
@@ -193,14 +192,13 @@ fn load_query_by_name() -> Option<NtQueryInformationByNameFn> {
 
 /// Verify that the system recognizes class 77 by querying a known file with NtQueryInformationByName.
 /// Return Some(NumberOfLinks) on success, or None on failure.
-fn test_single_file_class77(
-    dir_handle: HANDLE,
-    entries: &[(String, u32, u32)],
-) -> Option<u32> {
+fn test_single_file_class77(dir_handle: HANDLE, entries: &[(String, u32, u32)]) -> Option<u32> {
     let query_by_name = match load_query_by_name() {
         Some(f) => f,
         None => {
-            println!("  NtQueryInformationByName is unavailable (Windows 10 version 1709 or earlier)");
+            println!(
+                "  NtQueryInformationByName is unavailable (Windows 10 version 1709 or earlier)"
+            );
             return None;
         }
     };
@@ -231,7 +229,10 @@ fn test_single_file_class77(
     let mut found_size: Option<usize> = None;
     for probe_size in (64..=128).step_by(4) {
         let mut probe_buf = vec![0u8; probe_size];
-        let mut iosb_probe = IO_STATUS_BLOCK { Status: 0, Information: 0 };
+        let mut iosb_probe = IO_STATUS_BLOCK {
+            Status: 0,
+            Information: 0,
+        };
         let status_probe = unsafe {
             query_by_name(
                 &mut obj_attrs,
@@ -261,7 +262,10 @@ fn test_single_file_class77(
 
     // Call again with the correct size and parse the result.
     let mut stat_buf = vec![0u8; valid_size];
-    let mut iosb = IO_STATUS_BLOCK { Status: 0, Information: 0 };
+    let mut iosb = IO_STATUS_BLOCK {
+        Status: 0,
+        Information: 0,
+    };
     let status = unsafe {
         query_by_name(
             &mut obj_attrs,
@@ -277,19 +281,18 @@ fn test_single_file_class77(
     }
     // Extract NumberOfLinks from the valid_size buffer (offset 64, 4 bytes, per the FILE_STAT_BASIC_INFORMATION layout).
     if valid_size >= 68 {
-        let nlinks = u32::from_ne_bytes([
-            stat_buf[64], stat_buf[65], stat_buf[66], stat_buf[67],
-        ]);
-        let attrs = u32::from_ne_bytes([
-            stat_buf[56], stat_buf[57], stat_buf[58], stat_buf[59],
-        ]);
+        let nlinks = u32::from_ne_bytes([stat_buf[64], stat_buf[65], stat_buf[66], stat_buf[67]]);
+        let attrs = u32::from_ne_bytes([stat_buf[56], stat_buf[57], stat_buf[58], stat_buf[59]]);
         println!(
             "  Success: \"{}\" NumberOfLinks={} FileAttributes={:#x} (buffer size {})",
             name, nlinks, attrs, valid_size
         );
         Some(nlinks)
     } else {
-        println!("  valid_size {} is too small to contain the NumberOfLinks field", valid_size);
+        println!(
+            "  valid_size {} is too small to contain the NumberOfLinks field",
+            valid_size
+        );
         None
     }
 }
@@ -340,12 +343,7 @@ fn load_ntdll_query_dir() -> NtQueryDirectoryFileExFn {
         eprintln!("Error: failed to load ntdll.dll");
         process::exit(1);
     }
-    let proc = unsafe {
-        GetProcAddress(
-            module,
-            b"NtQueryDirectoryFileEx\0".as_ptr() as *const i8,
-        )
-    };
+    let proc = unsafe { GetProcAddress(module, b"NtQueryDirectoryFileEx\0".as_ptr() as *const i8) };
     if proc.is_null() {
         eprintln!("Error: failed to get the address of NtQueryDirectoryFileEx");
         process::exit(1);
@@ -404,7 +402,12 @@ fn query_dir_once_full(
 /// Dump the first max_bytes of the buffer as hex + ASCII, similar to xxd output.
 fn dump_hex(buffer: &[u8], max_bytes: usize, label: &str) {
     let n = buffer.len().min(max_bytes);
-    println!("\n=== {} (first {} bytes, total buffer length {}) ===", label, n, buffer.len());
+    println!(
+        "\n=== {} (first {} bytes, total buffer length {}) ===",
+        label,
+        n,
+        buffer.len()
+    );
     for chunk_start in (0..n).step_by(16) {
         let chunk_end = (chunk_start + 16).min(n);
         let chunk = &buffer[chunk_start..chunk_end];
@@ -415,7 +418,13 @@ fn dump_hex(buffer: &[u8], max_bytes: usize, label: &str) {
             .join(" ");
         let ascii: String = chunk
             .iter()
-            .map(|&b| if (32..=126).contains(&b) { b as char } else { '.' })
+            .map(|&b| {
+                if (32..=126).contains(&b) {
+                    b as char
+                } else {
+                    '.'
+                }
+            })
             .collect();
         println!("{:08x}: {:<48} {}", chunk_start, hex, ascii);
     }
@@ -441,9 +450,14 @@ fn parse_class37(buffer: &[u8]) -> Vec<(String, u32, u32)> {
             break;
         }
         let name_slice = unsafe {
-            std::slice::from_raw_parts(buffer.as_ptr().add(offset + name_off) as *const u16, name_chars)
+            std::slice::from_raw_parts(
+                buffer.as_ptr().add(offset + name_off) as *const u16,
+                name_chars,
+            )
         };
-        let name = OsString::from_wide(name_slice).to_string_lossy().into_owned();
+        let name = OsString::from_wide(name_slice)
+            .to_string_lossy()
+            .into_owned();
         // Skip "." and "..".
         if name != "." && name != ".." {
             out.push((name, entry.NextEntryOffset, offset as u32));
@@ -462,10 +476,7 @@ fn find_utf16_occurrences(buffer: &[u8], needle: &str) -> Vec<usize> {
     if encoded.is_empty() {
         return Vec::new();
     }
-    let needle_bytes: Vec<u8> = encoded
-        .iter()
-        .flat_map(|&w| w.to_ne_bytes())
-        .collect();
+    let needle_bytes: Vec<u8> = encoded.iter().flat_map(|&w| w.to_ne_bytes()).collect();
     let mut hits = Vec::new();
     if buffer.len() < needle_bytes.len() {
         return hits;
@@ -477,7 +488,6 @@ fn find_utf16_occurrences(buffer: &[u8], needle: &str) -> Vec<usize> {
     }
     hits
 }
-
 
 /// Read entries assuming the supplied position is the entry start (NextEntryOffset is assumed to be at offset 0),
 /// then attempt linked-list traversal. Return each inferred entry start.
@@ -531,9 +541,15 @@ fn main() {
     };
 
     let class37_entries = parse_class37(&buf37);
-    println!("\nclass 37 (FILE_ID_BOTH_DIR_INFO) parsed {} entries (excluding . / ..):", class37_entries.len());
+    println!(
+        "\nclass 37 (FILE_ID_BOTH_DIR_INFO) parsed {} entries (excluding . / ..):",
+        class37_entries.len()
+    );
     for (i, (name, nxt, off)) in class37_entries.iter().take(10).enumerate() {
-        println!("  [{}] offset={} NextEntryOffset={} name=\"{}\"", i, off, nxt, name);
+        println!(
+            "  [{}] offset={} NextEntryOffset={} name=\"{}\"",
+            i, off, nxt, name
+        );
     }
     if class37_entries.len() < 3 {
         eprintln!("Warning: too few entries in the test directory ({}); rerun in a directory containing at least 5 files", class37_entries.len());
@@ -561,11 +577,33 @@ fn main() {
     let mut buf77: Option<(Vec<u8>, usize)> = None;
     println!("\n=== class 77 (FileStatBasicInformation) parameter-combination tests ===");
     for (label, ret_single, fname, restart) in [
-        ("(a) ret_single=0, FileName=NULL, restart=1", 0i32, ptr::null::<u16>() as LPCWSTR, 1i32),
-        ("(b) ret_single=0, FileName=*",      0i32, star_wildcard.as_ptr()  as LPCWSTR, 1i32),
-        ("(c) ret_single=1, FileName=NULL",    1i32, ptr::null::<u16>() as LPCWSTR, 1i32),
+        (
+            "(a) ret_single=0, FileName=NULL, restart=1",
+            0i32,
+            ptr::null::<u16>() as LPCWSTR,
+            1i32,
+        ),
+        (
+            "(b) ret_single=0, FileName=*",
+            0i32,
+            star_wildcard.as_ptr() as LPCWSTR,
+            1i32,
+        ),
+        (
+            "(c) ret_single=1, FileName=NULL",
+            1i32,
+            ptr::null::<u16>() as LPCWSTR,
+            1i32,
+        ),
     ] {
-        match query_dir_once_full(query, guard2.0, FILE_STAT_BASIC_INFORMATION_CLASS, ret_single, fname, restart) {
+        match query_dir_once_full(
+            query,
+            guard2.0,
+            FILE_STAT_BASIC_INFORMATION_CLASS,
+            ret_single,
+            fname,
+            restart,
+        ) {
             Ok((b, n)) => {
                 println!("  {}→ success, wrote {} bytes", label, n);
                 if buf77.is_none() {
@@ -573,7 +611,12 @@ fn main() {
                 }
             }
             Err(e) => {
-                println!("  {}→ failed: NTSTATUS {} (raw OS error {})", label, e, e.raw_os_error().unwrap_or(0));
+                println!(
+                    "  {}→ failed: NTSTATUS {} (raw OS error {})",
+                    label,
+                    e,
+                    e.raw_os_error().unwrap_or(0)
+                );
             }
         }
     }
@@ -588,7 +631,10 @@ fn main() {
             Buffer: star_name.as_ptr() as *mut u16,
         };
         let mut probe_buf = vec![0u8; 64 * 1024];
-        let mut iosb = IO_STATUS_BLOCK { Status: 0, Information: 0 };
+        let mut iosb = IO_STATUS_BLOCK {
+            Status: 0,
+            Information: 0,
+        };
         let status = unsafe {
             query_dir_no_ex(
                 guard2.0,
@@ -605,9 +651,15 @@ fn main() {
             )
         };
         if status == 0 {
-            println!("  NtQueryDirectoryFile + class 77 succeeded, wrote {} bytes", iosb.Information);
+            println!(
+                "  NtQueryDirectoryFile + class 77 succeeded, wrote {} bytes",
+                iosb.Information
+            );
         } else {
-            println!("  NtQueryDirectoryFile + class 77 failed: 0x{:08x}", status as u32);
+            println!(
+                "  NtQueryDirectoryFile + class 77 failed: 0x{:08x}",
+                status as u32
+            );
         }
     } else {
         println!("  NtQueryDirectoryFile could not be loaded");
@@ -642,7 +694,10 @@ fn main() {
 
     // ── Step 3: linked-list traversal (assuming NextEntryOffset is at the start of each entry) ─
     let chain = walk_next_offset_chain(&buf77);
-    println!("\nclass 77 NextEntryOffset chain: inferred entry starts: {:?}", chain);
+    println!(
+        "\nclass 77 NextEntryOffset chain: inferred entry starts: {:?}",
+        chain
+    );
 
     // ── Step 4: use known filenames as anchors to locate entry headers in reverse ───────────
     println!("\n=== Searching the class 77 buffer for anchors using class 37 filenames ===");
@@ -716,7 +771,8 @@ fn main() {
                 };
                 let as_i64 = if chunk.len() >= 8 {
                     i64::from_ne_bytes([
-                        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+                        chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6],
+                        chunk[7],
                     ])
                 } else {
                     0
@@ -738,9 +794,8 @@ fn main() {
             //   NumberOfLinks(64,4) EffectiveAccess(68,8) = 72 bytes
             // Directory enumeration adds NextEntryOffset + FileNameLength + FileName[] to the header.
             println!("\n=== Searching for the LinkCount field ===");
-            if let Some((_, _, c37_off)) = class37_entries
-                .iter()
-                .find(|(n, _, _)| *n == baseline_name)
+            if let Some((_, _, c37_off)) =
+                class37_entries.iter().find(|(n, _, _)| *n == baseline_name)
             {
                 let c37_ptr = unsafe { buf37.as_ptr().add(*c37_off as usize) };
                 let c37_entry =
@@ -756,7 +811,10 @@ fn main() {
                 );
                 let ts_bytes = c37_entry.LastWriteTime.to_ne_bytes();
                 let header_slice = &buf77[entry_start..(entry_start + common_header)];
-                if let Some(idx_in_header) = header_slice.windows(8).position(|w| w == ts_bytes.as_slice()) {
+                if let Some(idx_in_header) = header_slice
+                    .windows(8)
+                    .position(|w| w == ts_bytes.as_slice())
+                {
                     let abs_off = entry_start + idx_in_header;
                     println!(
                         "  → Found LastWriteTime bytes at entry_start + {} (absolute offset {})",
@@ -792,7 +850,6 @@ fn main() {
     write_verdict_supported(&buf37, &buf77, &class37_entries, &anchors);
 }
 
-
 fn write_verdict_supported(
     _buf37: &[u8],
     _buf77: &[u8],
@@ -801,7 +858,6 @@ fn write_verdict_supported(
 ) {
     let _ = std::fs::create_dir_all("docs");
 }
-
 
 #[cfg(not(windows))]
 fn main() {

@@ -11,7 +11,12 @@
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let metadata = args.iter().any(|a| a == "--metadata" || a == "-m");
-    let path = args.iter().skip(1).find(|a| !a.starts_with('-')).cloned().unwrap_or_else(|| ".".to_string());
+    let path = args
+        .iter()
+        .skip(1)
+        .find(|a| !a.starts_with('-'))
+        .cloned()
+        .unwrap_or_else(|| ".".to_string());
 
     println!("=== jwalk-meta Unix scan ===");
     println!("Path: {}", path);
@@ -30,15 +35,19 @@ fn main() {
         } else {
             "fstatat (io_uring unavailable)"
         };
-        println!("Backend: Linux getdents64 + {} (streaming subdirs enabled)", io_uring_status);
+        println!(
+            "Backend: Linux getdents64 + {} (streaming subdirs enabled)",
+            io_uring_status
+        );
     }
 
     #[cfg(all(target_os = "linux", feature = "legacy-read-dir"))]
-    println!("Backend: Linux std::fs::read_dir (legacy-read-dir feature ENABLED, baseline benchmark)");
+    println!(
+        "Backend: Linux std::fs::read_dir (legacy-read-dir feature ENABLED, baseline benchmark)"
+    );
 
     #[cfg(all(unix, not(target_os = "linux")))]
     println!("Backend: std::fs::read_dir (getdents64 not available on this platform)");
-
 
     #[cfg(unix)]
     run_scan(&path, metadata);

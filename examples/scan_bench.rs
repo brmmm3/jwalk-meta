@@ -2,7 +2,7 @@ use std::time::Instant;
 
 fn main() {
     let path = std::env::args().nth(1).expect("Usage: scan_bench <path>");
-    
+
     println!("=== jwalk-meta scan benchmark ===");
     println!("Path: {}", path);
     println!();
@@ -11,7 +11,7 @@ fn main() {
     println!("Running scan...");
     use std::io::Write;
     let _ = std::io::stdout().flush();
-    
+
     let start = Instant::now();
     let mut total_entries = 0usize;
     let mut total_dirs = 0usize;
@@ -44,7 +44,11 @@ fn main() {
             println!(
                 "  [{:.1}s] entries: {} (dirs: {}, files: {}, errors: {}) | {:.0} entries/s",
                 elapsed_so_far.as_secs_f64(),
-                total_entries, total_dirs, total_files, total_errors, rate,
+                total_entries,
+                total_dirs,
+                total_files,
+                total_errors,
+                rate,
             );
             // flush stdout for immediate output
             use std::io::Write;
@@ -52,9 +56,9 @@ fn main() {
             last_log = now;
         }
     }
-    
+
     let elapsed = start.elapsed();
-    
+
     println!("Scan complete!");
     println!();
     println!("=== Results ===");
@@ -63,8 +67,11 @@ fn main() {
     println!("Files:         {}", total_files);
     println!("Errors:        {}", total_errors);
     println!("Time:          {:.3}s", elapsed.as_secs_f64());
-    println!("Rate:          {:.0} entries/s", total_entries as f64 / elapsed.as_secs_f64());
-    
+    println!(
+        "Rate:          {:.0} entries/s",
+        total_entries as f64 / elapsed.as_secs_f64()
+    );
+
     // Run again for comparison (caches warm)
     println!();
     println!("=== Second run (warm) ===");
@@ -77,8 +84,11 @@ fn main() {
     let elapsed2 = start2.elapsed();
     println!("Entries: {}", entries2);
     println!("Time:    {:.3}s", elapsed2.as_secs_f64());
-    println!("Rate:    {:.0} entries/s", entries2 as f64 / elapsed2.as_secs_f64());
-    
+    println!(
+        "Rate:    {:.0} entries/s",
+        entries2 as f64 / elapsed2.as_secs_f64()
+    );
+
     // std::fs comparison (skip for large/network paths)
     if elapsed.as_secs() < 30 {
         println!();
@@ -109,7 +119,10 @@ fn main() {
         println!("Entries: {}", entries3);
         println!("Errors:  {}", errors3);
         println!("Time:    {:.3}s", elapsed3.as_secs_f64());
-        println!("Rate:    {:.0} entries/s", entries3 as f64 / elapsed3.as_secs_f64());
+        println!(
+            "Rate:    {:.0} entries/s",
+            entries3 as f64 / elapsed3.as_secs_f64()
+        );
         println!();
         println!("=== Summary ===");
         println!("jwalk (cold):       {:.3}s", elapsed.as_secs_f64());

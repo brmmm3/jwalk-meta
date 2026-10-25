@@ -69,8 +69,8 @@ pub fn io_uring_enabled() -> bool {
 ///
 /// Specify the Entry type parameters explicitly to avoid inference failures with the multiple Entry / Entry128 candidates in version 0.7.x.
 fn probe_io_uring() -> bool {
-    use io_uring::squeue::Entry as SEntry;
     use io_uring::cqueue::Entry as CEntry;
+    use io_uring::squeue::Entry as SEntry;
     IoUring::<SEntry, CEntry>::builder()
         .setup_submit_all()
         .build(1)
@@ -265,8 +265,10 @@ mod tests {
         assert!(fd >= 0, "open dir failed");
 
         // Construct entries.
-        let mut entries: Vec<LinuxDirEntryOwned> =
-            file_names.iter().map(|n| make_entry(libc::DT_REG, n)).collect();
+        let mut entries: Vec<LinuxDirEntryOwned> = file_names
+            .iter()
+            .map(|n| make_entry(libc::DT_REG, n))
+            .collect();
 
         // Run batched statx.
         let mut statx_results = LinuxStatxResults::default();
@@ -282,7 +284,9 @@ mod tests {
 
         // Verify that each entry has statx and that stx_ino matches fs::stat.
         for (name, statx) in file_names.iter().zip(statx_results.results.iter()) {
-            let statx = statx.as_ref().expect("statx should be filled for existing file");
+            let statx = statx
+                .as_ref()
+                .expect("statx should be filled for existing file");
             let path = tmp.join(name);
             let fs_meta = fs::symlink_metadata(&path).unwrap();
             let fs_ino = fs_meta.ino();
@@ -320,10 +324,8 @@ mod tests {
             return;
         }
 
-        let tmp = std::env::temp_dir().join(format!(
-            "jwalk_meta_9mf_nul_test_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("jwalk_meta_9mf_nul_test_{}", std::process::id()));
         fs::create_dir_all(&tmp).unwrap();
         let _guard = scopeguard::guard(tmp.clone(), |p| {
             let _ = fs::remove_dir_all(p);
@@ -355,7 +357,10 @@ mod tests {
         }
 
         // The first result should be filled; the second should remain None (CString::new failed).
-        assert!(statx_results.results[0].is_some(), "valid entry should be filled");
+        assert!(
+            statx_results.results[0].is_some(),
+            "valid entry should be filled"
+        );
         assert!(
             statx_results.results[1].is_none(),
             "NUL-byte entry should remain None"
@@ -372,12 +377,7 @@ mod tests {
 
         // Use /dev/null as dirfd (it is not a directory); expect the CQE to return -ENOTDIR.
         let cstr = CString::new("/dev/null".as_bytes()).unwrap();
-        let fd = unsafe {
-            libc::open(
-                cstr.as_ptr(),
-                libc::O_RDONLY | libc::O_CLOEXEC,
-            )
-        };
+        let fd = unsafe { libc::open(cstr.as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
         if fd < 0 {
             eprintln!("skip: cannot open /dev/null");
             return;
@@ -436,13 +436,10 @@ mod tests {
         }
         impl<T, F: FnMut(T)> Drop for Guard<T, F> {
             fn drop(&mut self) {
-                if let (Some(value), Some(mut cleanup)) =
-                    (self.value.take(), self.cleanup.take())
-                {
+                if let (Some(value), Some(mut cleanup)) = (self.value.take(), self.cleanup.take()) {
                     cleanup(value);
                 }
             }
         }
     }
-
 }

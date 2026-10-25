@@ -156,7 +156,9 @@ fn statfs_strategy(path: &Path) -> Option<IoStrategy> {
 fn strategy_from_ftype(f_type: i64) -> IoStrategy {
     match f_type {
         // Network filesystem: candidate for io_uring (final decision is made by the latency probe).
-        SMB_SUPER_MAGIC | NFS_SUPER_MAGIC | CIFS_MAGIC_NUMBER | SMB2_SUPER_MAGIC => IoStrategy::NetworkAsync,
+        SMB_SUPER_MAGIC | NFS_SUPER_MAGIC | CIFS_MAGIC_NUMBER | SMB2_SUPER_MAGIC => {
+            IoStrategy::NetworkAsync
+        }
         // FAT family: skip the nlink query (nlink is always 1).
         MSDOS_SUPER_MAGIC | EXFAT_SUPER_MAGIC => IoStrategy::SkipNlinks,
         // Local filesystem: serial fstatat.
@@ -218,7 +220,10 @@ mod tests {
     /// The final strategy is determined by the latency probe in `statfs_strategy`.
     #[test]
     fn test_strategy_from_ftype_known_network() {
-        assert_eq!(strategy_from_ftype(NFS_SUPER_MAGIC), IoStrategy::NetworkAsync);
+        assert_eq!(
+            strategy_from_ftype(NFS_SUPER_MAGIC),
+            IoStrategy::NetworkAsync
+        );
         assert_eq!(
             strategy_from_ftype(CIFS_MAGIC_NUMBER),
             IoStrategy::NetworkAsync
@@ -233,7 +238,10 @@ mod tests {
     fn test_strategy_from_ftype_known_local() {
         assert_eq!(strategy_from_ftype(EXT4_SUPER_MAGIC), IoStrategy::LocalSync);
         assert_eq!(strategy_from_ftype(XFS_SUPER_MAGIC), IoStrategy::LocalSync);
-        assert_eq!(strategy_from_ftype(BTRFS_SUPER_MAGIC), IoStrategy::LocalSync);
+        assert_eq!(
+            strategy_from_ftype(BTRFS_SUPER_MAGIC),
+            IoStrategy::LocalSync
+        );
         assert_eq!(strategy_from_ftype(TMPFS_MAGIC), IoStrategy::LocalSync);
         assert_eq!(
             strategy_from_ftype(OVERLAYFS_SUPER_MAGIC),
@@ -243,8 +251,14 @@ mod tests {
 
     #[test]
     fn test_strategy_from_ftype_fat_family() {
-        assert_eq!(strategy_from_ftype(MSDOS_SUPER_MAGIC), IoStrategy::SkipNlinks);
-        assert_eq!(strategy_from_ftype(EXFAT_SUPER_MAGIC), IoStrategy::SkipNlinks);
+        assert_eq!(
+            strategy_from_ftype(MSDOS_SUPER_MAGIC),
+            IoStrategy::SkipNlinks
+        );
+        assert_eq!(
+            strategy_from_ftype(EXFAT_SUPER_MAGIC),
+            IoStrategy::SkipNlinks
+        );
     }
 
     #[test]

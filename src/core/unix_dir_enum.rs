@@ -452,15 +452,9 @@ mod tests {
 
     #[test]
     fn test_file_type_from_dtype_common_types() {
-        assert!(file_type_from_dtype(libc::DT_DIR)
-            .unwrap()
-            .is_dir());
-        assert!(file_type_from_dtype(libc::DT_REG)
-            .unwrap()
-            .is_file());
-        assert!(file_type_from_dtype(libc::DT_LNK)
-            .unwrap()
-            .is_symlink());
+        assert!(file_type_from_dtype(libc::DT_DIR).unwrap().is_dir());
+        assert!(file_type_from_dtype(libc::DT_REG).unwrap().is_file());
+        assert!(file_type_from_dtype(libc::DT_LNK).unwrap().is_symlink());
         assert!(file_type_from_dtype(libc::DT_UNKNOWN).is_none());
     }
 
@@ -525,10 +519,8 @@ mod tests {
     /// End-to-end check: run enumerate_dir_unix_streaming on a temporary directory.
     #[test]
     fn test_enumerate_dir_unix_streaming_on_tmpdir() {
-        let tmp = std::env::temp_dir().join(format!(
-            "jwalk_meta_unix_enum_test_{}",
-            std::process::id()
-        ));
+        let tmp =
+            std::env::temp_dir().join(format!("jwalk_meta_unix_enum_test_{}", std::process::id()));
         std::fs::create_dir_all(&tmp).unwrap();
         // Cleanup guard.
         let _guard = scopeguard::guard(tmp.clone(), |p| {
@@ -575,8 +567,16 @@ mod tests {
             )
         };
         assert!(fd >= 0);
-        assert!(entry_is_directory(fd, libc::DT_UNKNOWN, OsStr::new("subdir")));
-        assert!(!entry_is_directory(fd, libc::DT_UNKNOWN, OsStr::new("file")));
+        assert!(entry_is_directory(
+            fd,
+            libc::DT_UNKNOWN,
+            OsStr::new("subdir")
+        ));
+        assert!(!entry_is_directory(
+            fd,
+            libc::DT_UNKNOWN,
+            OsStr::new("file")
+        ));
         unsafe { libc::close(fd) };
     }
 }

@@ -4,7 +4,10 @@ use std::fs::{self, FileType};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use crate::{ClientState, Error, ReadDirSpec, Result, MetaData, get_metadata_ext, MetaDataExt, AncestorIdentity};
+use crate::{
+    get_metadata_ext, AncestorIdentity, ClientState, Error, MetaData, MetaDataExt, ReadDirSpec,
+    Result,
+};
 
 /// Representation of a file or directory.
 ///
@@ -90,7 +93,7 @@ impl<C: ClientState> DirEntry<C> {
     }
 
     // Only used for root and when following links.
-pub fn from_path(
+    pub fn from_path(
         depth: usize,
         path: &Path,
         read_metadata: bool,
@@ -152,10 +155,12 @@ pub fn from_path(
         parent_path: Arc<Path>,
         metadata: Option<MetaData>,
         metadata_ext: Option<MetaDataExt>,
-entry: &fs::DirEntry,
+        entry: &fs::DirEntry,
         follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
     ) -> Result<Self> {
-        let file_type = entry.file_type().map_err(|err| Error::from_io(depth, err))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|err| Error::from_io(depth, err))?;
         let read_children_path: Option<Arc<Path>> = if file_type.is_dir() {
             Some(Arc::from(entry.path()))
         } else {
@@ -304,7 +309,10 @@ entry: &fs::DirEntry,
             } else {
                 self.parent_path.join(&target)
             };
-            let canonical_target = resolved_target.canonicalize().ok().unwrap_or(resolved_target);
+            let canonical_target = resolved_target
+                .canonicalize()
+                .ok()
+                .unwrap_or(resolved_target);
 
             // Detect loops using metadata identities (more reliable and efficient than comparing canonicalized paths).
             // Unix: the (dev, ino) pair uniquely identifies a filesystem object.
@@ -316,11 +324,7 @@ entry: &fs::DirEntry,
                 if let Some(ancestors) = &self.follow_link_ancestors {
                     for ancestor in ancestors.iter().rev() {
                         if Self::ancestor_identity_eq(&target_ext, ancestor) {
-                            return Err(Error::from_loop(
-                                self.depth,
-                                &ancestor.path,
-                                path,
-                            ));
+                            return Err(Error::from_loop(self.depth, &ancestor.path, path));
                         }
                     }
                 }
@@ -342,7 +346,12 @@ entry: &fs::DirEntry,
         }
         #[cfg(windows)]
         {
-            match (target.volume_serial_number, target.file_index, ancestor.volume_serial_number, ancestor.file_index) {
+            match (
+                target.volume_serial_number,
+                target.file_index,
+                ancestor.volume_serial_number,
+                ancestor.file_index,
+            ) {
                 (Some(vol_t), Some(idx_t), Some(vol_a), Some(idx_a)) => {
                     vol_t == vol_a && idx_t == idx_a
                 }

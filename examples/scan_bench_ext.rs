@@ -7,8 +7,8 @@
 //!   2. Ext (metadata_ext=true, no hardlink information)
 //!   3. Ext+Hardlink (metadata_ext=true + hardlink_info=true)
 
-use std::time::Instant;
 use std::io::Write;
+use std::time::Instant;
 
 fn main() {
     let path = std::env::args()
@@ -67,11 +67,18 @@ fn main() {
     );
     println!(
         "Ext               | {:>8.3} | {:>8.3} | {:>7} | {:>+6.3}s |   -",
-        ext_time, ext_time2, ext_entries, ext_time - base_time
+        ext_time,
+        ext_time2,
+        ext_entries,
+        ext_time - base_time
     );
     println!(
         "Ext+Hardlink      | {:>8.3} | {:>8.3} | {:>7} | {:>+6.3}s | {:>+5.3}s",
-        hl_time, hl_time2, hl_entries, hl_time - base_time, hl_time - ext_time
+        hl_time,
+        hl_time2,
+        hl_entries,
+        hl_time - base_time,
+        hl_time - ext_time
     );
 }
 
@@ -121,9 +128,13 @@ fn scan_ext_hardlink(path: &str) -> (usize, usize, f64, usize) {
                 if let Some(ref ext) = e.metadata_ext {
                     let has_nlink = {
                         #[cfg(windows)]
-                        { ext.number_of_links.is_some() }
+                        {
+                            ext.number_of_links.is_some()
+                        }
                         #[cfg(unix)]
-                        { ext.st_nlink > 0 }
+                        {
+                            ext.st_nlink > 0
+                        }
                     };
                     if has_nlink {
                         with_nlink += 1;

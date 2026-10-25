@@ -119,6 +119,7 @@
 
 mod core;
 
+use core::is_transient_error;
 use rayon::ThreadPool;
 use std::cmp::Ordering;
 use std::ffi::OsStr;
@@ -126,11 +127,10 @@ use std::fmt::Debug;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use core::is_transient_error;
 
-use crate::core::{get_metadata_ext, ReadDir, ReadDirSpec, AncestorIdentity};
 #[cfg(not(all(target_os = "linux", feature = "legacy-read-dir")))]
-use crate::core::Weighted;  // Used only by the streaming getdents64 path.
+use crate::core::Weighted;
+use crate::core::{get_metadata_ext, AncestorIdentity, ReadDir, ReadDirSpec}; // Used only by the streaming getdents64 path.
 
 pub use crate::core::{DirEntry, DirEntryIter, Error, MetaData, MetaDataExt};
 pub use rayon;
@@ -287,7 +287,7 @@ impl<C: ClientState> WalkDirGeneric<C> {
         WalkDirGeneric {
             root: root.as_ref().to_path_buf(),
             options: WalkDirOptions {
-            sort: false,
+                sort: false,
                 min_depth: 0,
                 max_depth: usize::MAX,
                 skip_hidden: false,
@@ -556,8 +556,7 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
         let mut root_read_dir_state = self.options.root_read_dir_state;
         let follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>> = if follow_links {
             // The root entry's identity was already stat'ed in from_path; precompute it here.
-            AncestorIdentity::from_path(Arc::from(self.root.as_path()))
-                .map(|id| Arc::new(vec![id]))
+            AncestorIdentity::from_path(Arc::from(self.root.as_path())).map(|id| Arc::new(vec![id]))
         } else {
             None
         };
@@ -742,10 +741,7 @@ impl Parallelism {
 
 /// Retry transient I/O errors up to max_retries times, yielding the thread before each retry after the first.
 /// Return immediately for non-transient errors or when retries are exhausted.
-fn retry_transient_io<T>(
-    max_retries: u8,
-    mut op: impl FnMut() -> Result<T>,
-) -> Result<T> {
+fn retry_transient_io<T>(max_retries: u8, mut op: impl FnMut() -> Result<T>) -> Result<T> {
     for attempt in 0..=max_retries {
         match op() {
             Ok(result) => return Ok(result),
@@ -767,9 +763,7 @@ fn retry_transient_io<T>(
 }
 
 /// Sort DirEntry results by filename. Ok entries come before Err entries, and Err entries retain their relative order.
-fn sort_dir_entries_by_name<C: ClientState>(
-    entries: &mut [Result<DirEntry<C>>],
-) {
+fn sort_dir_entries_by_name<C: ClientState>(entries: &mut [Result<DirEntry<C>>]) {
     entries.sort_unstable_by(|a, b| match (a, b) {
         (Ok(a), Ok(b)) => a.file_name.cmp(&b.file_name),
         (Ok(_), Err(_)) => Ordering::Less,
@@ -824,9 +818,13 @@ mod read_dir_windows_helpers {
 
     /// Convert Windows FILETIME (100 ns ticks since 1601) to SystemTime.
     pub(super) fn filetime_to_systemtime(ft: i64) -> Option<std::time::SystemTime> {
-        if ft == 0 { return None; }
+        if ft == 0 {
+            return None;
+        }
         let duration_100ns = ft.saturating_sub(EPOCH_DIFFERENCE_100NS);
-        if duration_100ns < 0 { return None; }
+        if duration_100ns < 0 {
+            return None;
+        }
         let secs = (duration_100ns / HUNDRED_NS_PER_SEC) as u64;
         let nanos = ((duration_100ns % HUNDRED_NS_PER_SEC) * NS_PER_HUNDRED_NS) as u32;
         Some(std::time::UNIX_EPOCH + std::time::Duration::new(secs, nanos))
@@ -861,11 +859,15 @@ mod read_dir_windows_helpers {
         #[cfg(debug_assertions)]
         {
             let test_dir: std::fs::FileType = unsafe { std::mem::transmute(1u16) };
-            debug_assert!(test_dir.is_dir() && !test_dir.is_symlink(),
-                "FileType layout drift: bit 0 no longer maps to is_directory");
+            debug_assert!(
+                test_dir.is_dir() && !test_dir.is_symlink(),
+                "FileType layout drift: bit 0 no longer maps to is_directory"
+            );
             let test_sym: std::fs::FileType = unsafe { std::mem::transmute(256u16) };
-            debug_assert!(!test_sym.is_dir() && test_sym.is_symlink(),
-                "FileType layout drift: bit 8 no longer maps to is_symlink");
+            debug_assert!(
+                !test_sym.is_dir() && test_sym.is_symlink(),
+                "FileType layout drift: bit 8 no longer maps to is_symlink"
+            );
         }
         unsafe { std::mem::transmute(bits) }
     }
@@ -927,7 +929,7 @@ mod read_dir_windows_helpers {
             }
         };
 
-MetaDataExt {
+        MetaDataExt {
             file_attributes: info.file_attributes,
             volume_serial_number,
             number_of_links,
@@ -943,7 +945,7 @@ MetaDataExt {
         read_metadata: bool,
         read_metadata_ext: bool,
         read_hardlink_info: bool,
-    follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
+        follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
     ) -> Result<DirEntry<C>> {
         let entry_metadata = if read_metadata {
             Some(make_metadata(&info))
@@ -999,7 +1001,9 @@ fn read_dir_windows<C: ClientState>(
     process_read_dir: Option<&Arc<ProcessReadDirFunction<C>>>,
     streaming_ctx: Option<crate::core::StreamingContext<C>>,
 ) -> Result<ReadDir<C>> {
-    use crate::core::{enumerate_dir, enumerate_dir_streaming, batch_query_nlinks, detect_fs_type_and_vol_serial};
+    use crate::core::{
+        batch_query_nlinks, detect_fs_type_and_vol_serial, enumerate_dir, enumerate_dir_streaming,
+    };
     use read_dir_windows_helpers::*;
 
     // Select the enumeration strategy: streaming or non-streaming.
@@ -1037,9 +1041,7 @@ fn read_dir_windows<C: ClientState>(
                 return; // Dispatch subdirectories only.
             }
 
-            let child_path: Arc<Path> = Arc::from(
-                path.join(&dir_info.file_name)
-            );
+            let child_path: Arc<Path> = Arc::from(path.join(&dir_info.file_name));
             let spec = ReadDirSpec {
                 depth: read_dir_contents_depth,
                 path: child_path,
@@ -1047,15 +1049,15 @@ fn read_dir_windows<C: ClientState>(
                 follow_link_ancestors: follow_link_ancestors.clone(),
             };
 
-        // Priority-flooding algorithm: all entries on the streaming path use weight = parent_weight + 1.
-        // All streamed subdirectories have the same weight; BinaryHeap uses IndexPath as a tiebreaker (reverse Ord).
-        // Thus, the smaller IndexPath comes out first -> first discovered, first scheduled (matching OrderedQueue DFS output order).
-        //
-        // Bug fix: incrementing streamed_count+1 caused a max-heap to schedule later-discovered entries first,
-        // contrary to the comment's intent and inconsistent with the non-streaming path (uniform pipe_size).
-        // The non-streaming path (read_dir.rs) still uses parent_weight + pipe_size (the parent's total entry count);
-        // weight inheritance ensures branches of large pipelines also get high priority.
-        let weight = parent_weight.saturating_add(1);
+            // Priority-flooding algorithm: all entries on the streaming path use weight = parent_weight + 1.
+            // All streamed subdirectories have the same weight; BinaryHeap uses IndexPath as a tiebreaker (reverse Ord).
+            // Thus, the smaller IndexPath comes out first -> first discovered, first scheduled (matching OrderedQueue DFS output order).
+            //
+            // Bug fix: incrementing streamed_count+1 caused a max-heap to schedule later-discovered entries first,
+            // contrary to the comment's intent and inconsistent with the non-streaming path (uniform pipe_size).
+            // The non-streaming path (read_dir.rs) still uses parent_weight + pipe_size (the parent's total entry count);
+            // weight inheritance ensures branches of large pipelines also get high priority.
+            let weight = parent_weight.saturating_add(1);
             if let Some(last) = child_index_path.indices.last_mut() {
                 *last = streamed_count.get();
             }
@@ -1078,7 +1080,10 @@ fn read_dir_windows<C: ClientState>(
             // for a subdirectory that will never appear in looking_for. Return a ReadDir containing the error DirEntry,
             // with the correct streamed_child_count so the caller can advance the matcher.
             if streamed_child_count > 0 {
-                let mut read_dir = ReadDir::new(client_read_state, vec![Err(Error::from_path(0, path.to_path_buf(), err))]);
+                let mut read_dir = ReadDir::new(
+                    client_read_state,
+                    vec![Err(Error::from_path(0, path.to_path_buf(), err))],
+                );
                 read_dir.streamed_child_count = streamed_child_count;
                 return Ok(read_dir);
             }
@@ -1240,9 +1245,7 @@ fn read_dir_unix_fs_legacy<C: ClientState>(
         .filter_map(|dir_entry_result| {
             let fs_dir_entry = match dir_entry_result {
                 Ok(fs_dir_entry) => fs_dir_entry,
-                Err(err) => {
-                    return Some(Err(Error::from_io(read_dir_contents_depth, err)))
-                }
+                Err(err) => return Some(Err(Error::from_io(read_dir_contents_depth, err))),
             };
 
             let mut entry_metadata = None;
@@ -1347,10 +1350,8 @@ fn read_dir_linux_via_getdents<C: ClientState>(
     // Following links can turn a symlink into a traversable directory only after entry
     // conversion. Keep that case on the regular scheduling path so it is not omitted from
     // streaming's child count / ordered traversal accounting.
-    let use_streaming = streaming_ctx.is_some()
-        && !sort
-        && process_read_dir.is_none()
-        && !follow_links;
+    let use_streaming =
+        streaming_ctx.is_some() && !sort && process_read_dir.is_none() && !follow_links;
     let streamed_count = Cell::new(0usize);
 
     let entries_result: std::io::Result<(DirFdGuard, Vec<LinuxDirEntryOwned>)> = if use_streaming {
@@ -1442,11 +1443,12 @@ fn read_dir_linux_via_getdents<C: ClientState>(
         let need_meta_or_type = read_metadata
             || read_metadata_ext
             || entries.iter().any(|e| e.d_type == libc::DT_UNKNOWN);
-        if need_meta_or_type && entries.len() >= crate::core::linux_io_uring::MIN_BATCH_FOR_IO_URING {
+        if need_meta_or_type && entries.len() >= crate::core::linux_io_uring::MIN_BATCH_FOR_IO_URING
+        {
             // fstat the already-open directory descriptor to obtain st_dev for the per-worker
             // cache. This avoids resolving the directory path again on every cache hit.
-            let strategy = IO_STRATEGY_CACHE
-                .with(|c| c.borrow_mut().detect_for_fd(path.as_ref(), dirfd));
+            let strategy =
+                IO_STRATEGY_CACHE.with(|c| c.borrow_mut().detect_for_fd(path.as_ref(), dirfd));
             if strategy == IoStrategy::NetworkAsync
                 && crate::core::linux_io_uring::io_uring_enabled()
             {
@@ -1528,14 +1530,14 @@ fn make_dir_entry_linux<C: ClientState>(
     statx: crate::core::unix_dir_enum::LinuxStatxResult,
     follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
 ) -> Result<DirEntry<C>> {
-    use crate::core::unix_dir_enum::{fstatat_metadata, file_type_from_dtype, file_type_from_mode};
+    use crate::core::unix_dir_enum::{file_type_from_dtype, file_type_from_mode, fstatat_metadata};
     use std::os::unix::fs::PermissionsExt;
 
     let need_stat = read_metadata || read_metadata_ext || info.d_type == libc::DT_UNKNOWN;
 
     // d_type -> FileType (fall back to S_IFREG for DT_UNKNOWN; overwritten if statx/fstatat succeeds below).
-    let mut file_type = file_type_from_dtype(info.d_type)
-        .unwrap_or_else(|| file_type_from_mode(libc::S_IFREG));
+    let mut file_type =
+        file_type_from_dtype(info.d_type).unwrap_or_else(|| file_type_from_mode(libc::S_IFREG));
 
     let mut entry_metadata = None;
     let mut entry_metadata_ext = None;
@@ -1556,46 +1558,47 @@ fn make_dir_entry_linux<C: ClientState>(
         // GNU target: prefer synchronous statx (retrieves birth time; the io_uring.rs mask already includes STATX_BTIME).
         // musl target: libc does not export statx, so use fstatat directly (no btime).
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        let statx_sync_ok: bool = match crate::core::unix_dir_enum::statx_metadata(dirfd, &info.name) {
-            Ok(statx) => {
-                let mode = statx.stx_mode as libc::mode_t;
-                if info.d_type == libc::DT_UNKNOWN {
-                    file_type = file_type_from_mode(mode);
+        let statx_sync_ok: bool =
+            match crate::core::unix_dir_enum::statx_metadata(dirfd, &info.name) {
+                Ok(statx) => {
+                    let mode = statx.stx_mode as libc::mode_t;
+                    if info.d_type == libc::DT_UNKNOWN {
+                        file_type = file_type_from_mode(mode);
+                    }
+                    if read_metadata {
+                        entry_metadata = Some(MetaData {
+                            is_dir: (mode & libc::S_IFMT) == libc::S_IFDIR,
+                            is_file: (mode & libc::S_IFMT) == libc::S_IFREG,
+                            is_symlink: (mode & libc::S_IFMT) == libc::S_IFLNK,
+                            size: statx.stx_size,
+                            created: if statx.stx_mask & libc::STATX_BTIME != 0 {
+                                statx_time_to_systemtime(statx.stx_btime)
+                            } else {
+                                None
+                            },
+                            changed: statx_time_to_systemtime(statx.stx_ctime),
+                            modified: statx_time_to_systemtime(statx.stx_mtime),
+                            accessed: statx_time_to_systemtime(statx.stx_atime),
+                            permissions: Some(std::fs::Permissions::from_mode(mode)),
+                        });
+                    }
+                    if read_metadata_ext {
+                        entry_metadata_ext = Some(MetaDataExt {
+                            st_mode: mode as u32,
+                            st_ino: statx.stx_ino,
+                            st_dev: linux_makedev(statx.stx_dev_major, statx.stx_dev_minor),
+                            st_nlink: statx.stx_nlink as u64,
+                            st_blksize: statx.stx_blksize as u64,
+                            st_blocks: statx.stx_blocks,
+                            st_uid: statx.stx_uid,
+                            st_gid: statx.stx_gid,
+                            st_rdev: linux_makedev(statx.stx_rdev_major, statx.stx_rdev_minor),
+                        });
+                    }
+                    true
                 }
-                if read_metadata {
-                    entry_metadata = Some(MetaData {
-                        is_dir: (mode & libc::S_IFMT) == libc::S_IFDIR,
-                        is_file: (mode & libc::S_IFMT) == libc::S_IFREG,
-                        is_symlink: (mode & libc::S_IFMT) == libc::S_IFLNK,
-                        size: statx.stx_size,
-                        created: if statx.stx_mask & libc::STATX_BTIME != 0 {
-                            statx_time_to_systemtime(statx.stx_btime)
-                        } else {
-                            None
-                        },
-                        changed: statx_time_to_systemtime(statx.stx_ctime),
-                        modified: statx_time_to_systemtime(statx.stx_mtime),
-                        accessed: statx_time_to_systemtime(statx.stx_atime),
-                        permissions: Some(std::fs::Permissions::from_mode(mode)),
-                    });
-                }
-                if read_metadata_ext {
-                    entry_metadata_ext = Some(MetaDataExt {
-                        st_mode: mode as u32,
-                        st_ino: statx.stx_ino,
-                        st_dev: linux_makedev(statx.stx_dev_major, statx.stx_dev_minor),
-                        st_nlink: statx.stx_nlink as u64,
-                        st_blksize: statx.stx_blksize as u64,
-                        st_blocks: statx.stx_blocks,
-                        st_uid: statx.stx_uid,
-                        st_gid: statx.stx_gid,
-                        st_rdev: linux_makedev(statx.stx_rdev_major, statx.stx_rdev_minor),
-                    });
-                }
-                true
-            }
-            Err(_) => false,
-        };
+                Err(_) => false,
+            };
         #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
         let statx_sync_ok: bool = false;
 
@@ -1658,7 +1661,11 @@ fn make_dir_entry_linux<C: ClientState>(
 /// GNU path only: the `libc` crate does not export `statx`/`statx_timestamp`/
 /// `STATX_BASIC_STATS` for musl targets, and referencing `libc::statx` on musl causes E0425. Return true when statx is available
 /// and fields were populated (the caller can skip fstatat).
-#[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "legacy-read-dir")))]
+#[cfg(all(
+    target_os = "linux",
+    target_env = "gnu",
+    not(feature = "legacy-read-dir")
+))]
 fn try_fill_from_statx(
     statx_result: crate::core::unix_dir_enum::LinuxStatxResult,
     d_type: u8,
@@ -1716,7 +1723,11 @@ fn try_fill_from_statx(
 }
 
 /// musl / non-GNU stub: `libc::statx` is not exported for musl, so return false and use fstatat.
-#[cfg(all(target_os = "linux", not(target_env = "gnu"), not(feature = "legacy-read-dir")))]
+#[cfg(all(
+    target_os = "linux",
+    not(target_env = "gnu"),
+    not(feature = "legacy-read-dir")
+))]
 fn try_fill_from_statx(
     _statx_result: crate::core::unix_dir_enum::LinuxStatxResult,
     _d_type: u8,
@@ -1744,7 +1755,11 @@ fn time_to_systemtime(sec: libc::time_t, nsec: i64) -> Option<std::time::SystemT
 ///
 /// statx uses a separate `statx_timestamp` structure (tv_sec: i64 + tv_nsec: u32 + __reserved: i32),
 /// unlike stat's split sec/nsec fields. stx_btime is the creation time (stat has no corresponding field).
-#[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "legacy-read-dir")))]
+#[cfg(all(
+    target_os = "linux",
+    target_env = "gnu",
+    not(feature = "legacy-read-dir")
+))]
 fn statx_time_to_systemtime(ts: libc::statx_timestamp) -> Option<std::time::SystemTime> {
     use std::time::{Duration, UNIX_EPOCH};
     if ts.tv_sec < 0 {
@@ -1765,8 +1780,7 @@ fn statx_time_to_systemtime(ts: libc::statx_timestamp) -> Option<std::time::Syst
 /// bits 20-31:  high 12 bits of minor.
 /// bits 32-63:  high 20 bits of major.
 /// ```
-#[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))
-]
+#[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
 fn linux_makedev(major: u32, minor: u32) -> u64 {
     let major = major as u64;
     let minor = minor as u64;
@@ -1778,8 +1792,7 @@ fn linux_makedev(major: u32, minor: u32) -> u64 {
 
 // Per-worker IoStrategy cache: each Rayon worker has its own cache to avoid lock contention.
 // Call statfs only once per st_dev (see beads: ntfs-mft-lock-kills-local-io-uring).
-#[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))
-]
+#[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
 thread_local! {
     static IO_STRATEGY_CACHE: std::cell::RefCell<crate::core::fs_detect::IoStrategyCache> =
         std::cell::RefCell::new(crate::core::fs_detect::IoStrategyCache::new());

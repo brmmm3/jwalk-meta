@@ -261,29 +261,32 @@ fn is_transient_io_error(err: &io::Error) -> bool {
     if let Some(code) = err.raw_os_error() {
         #[cfg(windows)]
         {
-            return matches!(code,
+            return matches!(
+                code,
                 32 |    // ERROR_SHARING_VIOLATION
                 33 |    // ERROR_LOCK_VIOLATION
                 54 |    // ERROR_NETWORK_BUSY
                 121 |   // ERROR_SEM_TIMEOUT
-                1237    // ERROR_RETRY
+                1237 // ERROR_RETRY
             );
         }
         #[cfg(not(windows))]
         {
-            return matches!(code,
+            return matches!(
+                code,
                 11 |    // EAGAIN
                 16 |    // EBUSY
-                150     // ESTALE
+                150 // ESTALE
             );
         }
     }
-    matches!(err.kind(),
-        io::ErrorKind::TimedOut |
-        io::ErrorKind::Interrupted |
-        io::ErrorKind::WouldBlock |
-        io::ErrorKind::ConnectionReset |
-        io::ErrorKind::ConnectionAborted
+    matches!(
+        err.kind(),
+        io::ErrorKind::TimedOut
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
     )
 }
 

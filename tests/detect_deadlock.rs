@@ -12,9 +12,10 @@ fn works() {
         .collect::<Vec<usize>>()
         .par_iter()
         .for_each(|round| {
-            let generic = WalkDir::new(".").parallelism(jwalk_meta::Parallelism::RayonDefaultPool {
-                busy_timeout: std::time::Duration::from_millis(10),
-            });
+            let generic =
+                WalkDir::new(".").parallelism(jwalk_meta::Parallelism::RayonDefaultPool {
+                    busy_timeout: std::time::Duration::from_millis(10),
+                });
             if *round == 0 {
                 for entry in generic {
                     match entry {

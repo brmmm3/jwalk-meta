@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use crate::{ClientState, AncestorIdentity};
+use crate::{AncestorIdentity, ClientState};
 
 /// Specification for reading a directory.
 ///

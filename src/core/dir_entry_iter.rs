@@ -49,11 +49,16 @@ impl<C: ClientState> DirEntryIter<C> {
             .collect();
 
         // 2. Init new read_dir_iter from those specs
-        let (read_dir_iter, stop) =
-            match ReadDirIter::try_new(read_dir_specs, parallelism, core_read_dir_callback, channel_capacity, max_receive_buffer_size) {
-                Some((iter, stop)) => (Some(iter.peekable()), stop),
-                None => (None, None),
-            };
+        let (read_dir_iter, stop) = match ReadDirIter::try_new(
+            read_dir_specs,
+            parallelism,
+            core_read_dir_callback,
+            channel_capacity,
+            max_receive_buffer_size,
+        ) {
+            Some((iter, stop)) => (Some(iter.peekable()), stop),
+            None => (None, None),
+        };
 
         // 3. Return DirEntryIter that will return initial root entries and then
         //    fill and process read_dir_iter until complete

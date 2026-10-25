@@ -9,8 +9,10 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 /// The second argument, `Option<StreamingContext<C>>`, provides streaming-dispatch context in parallel mode,
 /// allowing subdirectories to be scheduled immediately during enumeration instead of waiting for enumeration to finish.
 /// Pass `None` in single-threaded Walk mode.
-pub(crate) type ReadDirCallback<C> =
-    dyn Fn(ReadDirSpec<C>, Option<StreamingContext<C>>) -> Result<ReadDir<C>> + Send + Sync + 'static;
+pub(crate) type ReadDirCallback<C> = dyn Fn(ReadDirSpec<C>, Option<StreamingContext<C>>) -> Result<ReadDir<C>>
+    + Send
+    + Sync
+    + 'static;
 
 /// Streaming-dispatch context for immediately scheduling subdirectories during NT enumeration.
 ///
@@ -26,7 +28,11 @@ pub(crate) struct StreamingContext<C: ClientState> {
 }
 
 impl<C: ClientState> StreamingContext<C> {
-    pub(crate) fn new(index_path: IndexPath, run_context: RunContext<C>, parent_weight: usize) -> Self {
+    pub(crate) fn new(
+        index_path: IndexPath,
+        run_context: RunContext<C>,
+        parent_weight: usize,
+    ) -> Self {
         StreamingContext {
             index_path,
             run_context,
@@ -91,7 +97,11 @@ impl<C: ClientState> ReadDirIter<C> {
             for read_dir_spec in read_dir_specs.into_iter() {
                 // The channel cannot be full during initialization (it was just created), but use expect to make the invariant explicit.
                 read_dir_spec_queue
-                    .push(Weighted::new(read_dir_spec, IndexPath::new(smallvec![0]), ROOT_WEIGHT))
+                    .push(Weighted::new(
+                        read_dir_spec,
+                        IndexPath::new(smallvec![0]),
+                        ROOT_WEIGHT,
+                    ))
                     .expect("init: priority queue push should not fail");
             }
 
@@ -185,7 +195,8 @@ fn multi_threaded_walk_dir<C: ClientState>(
         weight: parent_weight,
     } = weighted_read_dir_spec;
 
-    let streaming_ctx = StreamingContext::new(index_path.clone(), run_context.clone(), parent_weight);
+    let streaming_ctx =
+        StreamingContext::new(index_path.clone(), run_context.clone(), parent_weight);
 
     let read_dir_result = (run_context.core_read_dir_callback)(read_dir_spec, Some(streaming_ctx));
 
@@ -203,15 +214,13 @@ fn multi_threaded_walk_dir<C: ClientState>(
         None
     };
 
-    let streamed_count = read_dir_result.as_ref().map_or(0, |rd| rd.streamed_child_count);
+    let streamed_count = read_dir_result
+        .as_ref()
+        .map_or(0, |rd| rd.streamed_child_count);
     let regular_count = weighted_children_specs.as_ref().map_or(0, Vec::len);
     let child_count = streamed_count + regular_count;
 
-    let ordered_read_dir_result = Ordered::new(
-        read_dir_result,
-        index_path,
-        child_count,
-    );
+    let ordered_read_dir_result = Ordered::new(read_dir_result, index_path, child_count);
 
     let send_ok = run_context.send_read_dir_result(ordered_read_dir_result);
 

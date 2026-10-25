@@ -20,7 +20,11 @@ fn windows_symlink_dir_nofollow() {
     let r = dir.run_recursive(wd);
     r.assert_no_errors();
 
-    assert!(r.ents().len() >= 3, "expected >= 3 entries, got {}", r.ents().len());
+    assert!(
+        r.ents().len() >= 3,
+        "expected >= 3 entries, got {}",
+        r.ents().len()
+    );
 
     let link_ent = r.ents().iter().find(|e| e.file_name() == "link");
     if let Some(link) = link_ent {
@@ -41,7 +45,11 @@ fn windows_symlink_dir_follow() {
     let r = dir.run_recursive(wd);
     r.assert_no_errors();
 
-    assert!(r.ents().len() >= 4, "expected >= 4 entries, got {}", r.ents().len());
+    assert!(
+        r.ents().len() >= 4,
+        "expected >= 4 entries, got {}",
+        r.ents().len()
+    );
 }
 
 #[cfg(windows)]
@@ -58,7 +66,11 @@ fn windows_symlink_file() {
 
     assert_eq!(3, r.ents().len());
 
-    let link_ent = r.ents().iter().find(|e| e.file_name() == "link.txt").unwrap();
+    let link_ent = r
+        .ents()
+        .iter()
+        .find(|e| e.file_name() == "link.txt")
+        .unwrap();
     assert!(link_ent.path_is_symlink());
 }
 
@@ -93,5 +105,9 @@ fn windows_symlink_parallel() {
     let r = dir.run_recursive(wd);
     r.assert_no_errors();
 
-    assert!(r.ents().len() >= 5, "expected >= 5 entries, got {}", r.ents().len());
+    assert!(
+        r.ents().len() >= 5,
+        "expected >= 5 entries, got {}",
+        r.ents().len()
+    );
 }

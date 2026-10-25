@@ -1179,17 +1179,50 @@ fn priority_scheduling_dfs_order_preserved() {
     let r = dir.run_recursive(wd);
     r.assert_no_errors();
 
-    let paths: Vec<String> = r.ents().iter()
-        .map(|e| e.path().strip_prefix(dir.path()).unwrap().to_str().unwrap().replace('\\', "/"))
+    let paths: Vec<String> = r
+        .ents()
+        .iter()
+        .map(|e| {
+            e.path()
+                .strip_prefix(dir.path())
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .replace('\\', "/")
+        })
         .collect();
 
     // Must contain all entries (no loss)
-    assert!(paths.iter().any(|p| p.contains("root.txt")), "missing root.txt in {:?}", paths);
-    assert!(paths.iter().any(|p| p.contains("1.txt")), "missing 1.txt in {:?}", paths);
-    assert!(paths.iter().any(|p| p.contains("2.txt")), "missing 2.txt in {:?}", paths);
-    assert!(paths.iter().any(|p| p.contains("3.txt")), "missing 3.txt in {:?}", paths);
-    assert!(paths.iter().any(|p| p.contains("heavy")), "missing heavy dir in {:?}", paths);
-    assert!(paths.iter().any(|p| p.contains("light")), "missing light dir in {:?}", paths);
+    assert!(
+        paths.iter().any(|p| p.contains("root.txt")),
+        "missing root.txt in {:?}",
+        paths
+    );
+    assert!(
+        paths.iter().any(|p| p.contains("1.txt")),
+        "missing 1.txt in {:?}",
+        paths
+    );
+    assert!(
+        paths.iter().any(|p| p.contains("2.txt")),
+        "missing 2.txt in {:?}",
+        paths
+    );
+    assert!(
+        paths.iter().any(|p| p.contains("3.txt")),
+        "missing 3.txt in {:?}",
+        paths
+    );
+    assert!(
+        paths.iter().any(|p| p.contains("heavy")),
+        "missing heavy dir in {:?}",
+        paths
+    );
+    assert!(
+        paths.iter().any(|p| p.contains("light")),
+        "missing light dir in {:?}",
+        paths
+    );
 }
 
 #[test]
@@ -1208,7 +1241,11 @@ fn priority_scheduling_single_thread_no_deadlock() {
     r.assert_no_errors();
 
     // Single thread must find all entries without deadlocking
-    assert!(r.ents().len() >= 7, "expected >= 7 entries, got {}", r.ents().len());
+    assert!(
+        r.ents().len() >= 7,
+        "expected >= 7 entries, got {}",
+        r.ents().len()
+    );
 }
 
 #[test]
@@ -1230,7 +1267,11 @@ fn priority_scheduling_deep_tree() {
     r.assert_no_errors();
 
     // 10 dirs + 1 file at bottom + 1 root file + root dir = 13
-    assert!(r.ents().len() >= 12, "expected >= 12 entries, got {}", r.ents().len());
+    assert!(
+        r.ents().len() >= 12,
+        "expected >= 12 entries, got {}",
+        r.ents().len()
+    );
 }
 
 #[test]
@@ -1251,7 +1292,11 @@ fn priority_scheduling_wide_tree() {
     r.assert_no_errors();
 
     // root + root.txt + 50 dirs + 50 files = 102
-    assert!(r.ents().len() >= 100, "expected >= 100 entries, got {}", r.ents().len());
+    assert!(
+        r.ents().len() >= 100,
+        "expected >= 100 entries, got {}",
+        r.ents().len()
+    );
 }
 
 #[test]
@@ -1274,8 +1319,13 @@ fn priority_scheduling_serial_unchanged() {
     let par_r = dir.run_recursive(par_wd);
 
     // Serial and parallel should produce same number of entries
-    assert_eq!(serial_r.ents().len(), par_r.ents().len(),
-        "serial {} != parallel {}", serial_r.ents().len(), par_r.ents().len());
+    assert_eq!(
+        serial_r.ents().len(),
+        par_r.ents().len(),
+        "serial {} != parallel {}",
+        serial_r.ents().len(),
+        par_r.ents().len()
+    );
 }
 
 #[test]
@@ -1299,7 +1349,11 @@ fn priority_scheduling_weight_propagation() {
     r.assert_no_errors();
 
     // 10 heavy subdirs + 10 files + 3 light files + root dir = 24
-    assert!(r.ents().len() >= 23, "expected >= 23 entries, got {}", r.ents().len());
+    assert!(
+        r.ents().len() >= 23,
+        "expected >= 23 entries, got {}",
+        r.ents().len()
+    );
 }
 
 // ==================== Channel & Stress Tests ====================
@@ -1431,12 +1485,18 @@ fn unicode_special_filenames() {
         .iter()
         .map(|p| p.to_string_lossy().to_string())
         .collect();
-    assert!(paths.iter().any(|p| p.contains("日本語")), "missing Japanese dir");
+    assert!(
+        paths.iter().any(|p| p.contains("日本語")),
+        "missing Japanese dir"
+    );
     assert!(
         paths.iter().any(|p| p.contains("中文目录")),
         "missing Chinese dir"
     );
-    assert!(paths.iter().any(|p| p.contains("한국어")), "missing Korean dir");
+    assert!(
+        paths.iter().any(|p| p.contains("한국어")),
+        "missing Korean dir"
+    );
 }
 
 // ==================== Additional Coverage Tests ====================
@@ -1492,7 +1552,11 @@ fn ci_thread_scalability() {
             .sort(true),
     );
     serial_r.assert_no_errors();
-    assert_eq!(expected_count, serial_r.ents().len(), "Serial count mismatch");
+    assert_eq!(
+        expected_count,
+        serial_r.ents().len(),
+        "Serial count mismatch"
+    );
 
     // Test 1 thread
     let r1 = dir.run_recursive(
@@ -1501,11 +1565,7 @@ fn ci_thread_scalability() {
             .sort(true),
     );
     r1.assert_no_errors();
-    assert_eq!(
-        expected_count,
-        r1.ents().len(),
-        "1-thread count mismatch"
-    );
+    assert_eq!(expected_count, r1.ents().len(), "1-thread count mismatch");
 
     // Test 2 threads
     let r2 = dir.run_recursive(
@@ -1514,11 +1574,7 @@ fn ci_thread_scalability() {
             .sort(true),
     );
     r2.assert_no_errors();
-    assert_eq!(
-        expected_count,
-        r2.ents().len(),
-        "2-thread count mismatch"
-    );
+    assert_eq!(expected_count, r2.ents().len(), "2-thread count mismatch");
 
     // Test 4 threads
     let r4 = dir.run_recursive(
@@ -1527,11 +1583,7 @@ fn ci_thread_scalability() {
             .sort(true),
     );
     r4.assert_no_errors();
-    assert_eq!(
-        expected_count,
-        r4.ents().len(),
-        "4-thread count mismatch"
-    );
+    assert_eq!(expected_count, r4.ents().len(), "4-thread count mismatch");
 
     // Test 8 threads (more than CPU cores is fine)
     let r8 = dir.run_recursive(
@@ -1540,11 +1592,7 @@ fn ci_thread_scalability() {
             .sort(true),
     );
     r8.assert_no_errors();
-    assert_eq!(
-        expected_count,
-        r8.ents().len(),
-        "8-thread count mismatch"
-    );
+    assert_eq!(expected_count, r8.ents().len(), "8-thread count mismatch");
 }
 
 #[test]
@@ -1625,7 +1673,9 @@ fn parallel_follow_directory_symlink_with_streamable_sibling() {
     );
     results.assert_no_errors();
     assert!(
-        results.paths().contains(&dir.join("linkdir/through-link.txt")),
+        results
+            .paths()
+            .contains(&dir.join("linkdir/through-link.txt")),
         "the target file must be visited through the directory symlink"
     );
 }
@@ -1653,11 +1703,7 @@ fn permission_denied_graceful() {
     // Walk a non-existent subdirectory should produce an error but not crash
     let wd = WalkDir::new(dir.path().join("nonexistent"));
     let r2 = dir.run_recursive(wd);
-    assert_eq!(
-        1,
-        r2.errs().len(),
-        "expected 1 error for nonexistent path"
-    );
+    assert_eq!(1, r2.errs().len(), "expected 1 error for nonexistent path");
 }
 
 #[test]
@@ -1769,11 +1815,17 @@ fn symlink_file_and_cycle_detection() {
 
     let file_link = r.ents().iter().find(|e| e.file_name() == "link.txt");
     assert!(file_link.is_some(), "file symlink not found");
-    assert!(file_link.unwrap().path_is_symlink(), "link.txt should be a symlink");
+    assert!(
+        file_link.unwrap().path_is_symlink(),
+        "link.txt should be a symlink"
+    );
 
     let dir_link = r.ents().iter().find(|e| e.file_name() == "link_dir");
     assert!(dir_link.is_some(), "dir symlink not found");
-    assert!(dir_link.unwrap().path_is_symlink(), "link_dir should be a symlink");
+    assert!(
+        dir_link.unwrap().path_is_symlink(),
+        "link_dir should be a symlink"
+    );
 
     // Test with follow_links
     let wd_follow = WalkDir::new(dir.path()).follow_links(true).sort(true);
@@ -1785,7 +1837,8 @@ fn symlink_file_and_cycle_detection() {
     assert!(
         follow_count >= nofollow_count,
         "follow_links should find at least as many entries: {} < {}",
-        follow_count, nofollow_count
+        follow_count,
+        nofollow_count
     );
 }
 
@@ -1813,10 +1866,7 @@ fn symlink_cycle_detection_with_follow() {
     let wd = WalkDir::new(dir.path()).follow_links(true).sort(true);
     let r = dir.run_recursive(wd);
     // With follow_links, a symlink loop should be detected and produce a Loop error (not loop forever).
-    let has_loop_error = r
-        .errs()
-        .iter()
-        .any(|e| format!("{:?}", e).contains("Loop"));
+    let has_loop_error = r.errs().iter().any(|e| format!("{:?}", e).contains("Loop"));
     assert!(
         has_loop_error,
         "expected Loop error for cycle, got errors: {:?}",
@@ -1857,5 +1907,8 @@ fn broken_symlink_handling() {
 
     let broken = r.ents().iter().find(|e| e.file_name() == "broken");
     assert!(broken.is_some(), "broken symlink should appear as entry");
-    assert!(broken.unwrap().path_is_symlink(), "broken should be a symlink");
+    assert!(
+        broken.unwrap().path_is_symlink(),
+        "broken should be a symlink"
+    );
 }

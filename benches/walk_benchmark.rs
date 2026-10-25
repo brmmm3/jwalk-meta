@@ -3,12 +3,12 @@
 
 use std::cmp;
 use std::fs::{create_dir_all, File, Metadata};
+use std::hint::black_box;
 use std::io::{self, ErrorKind, Read};
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc;
-use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, Criterion};
 use flate2::read::GzDecoder;

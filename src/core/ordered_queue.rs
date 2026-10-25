@@ -125,7 +125,8 @@ where
 
             // Drain the channel only if the heap head is not the target, reducing heap growth.
             let looking_for = &self.ordered_matcher.looking_for;
-            let top_matches = self.receive_buffer
+            let top_matches = self
+                .receive_buffer
                 .peek()
                 .is_some_and(|top| top.index_path.eq(looking_for));
             if !top_matches {
