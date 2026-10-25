@@ -1,16 +1,16 @@
-//! Linux io_uring 批量 STATX 封装（Linux-only）。
+//! Linux-only wrapper for batched STATX via io_uring.
 //!
-//! 仅用于网络挂载（SMB/NFS/CIFS），单次 `io_uring_submit_and_wait(N)` 批量获取 N 个条目的
-//! statx，替代 N 次 per-entry `fstatat`。`setup_submit_all` 保证单 SQE 失败不阻断整批。
+//! Used only for network mounts (SMB/NFS/CIFS). A single `io_uring_submit_and_wait(N)` fetches
+//! statx for N entries, replacing N per-entry `fstatat` calls. `setup_submit_all` ensures one failed SQE does not block the batch.
 //!
-//! 内核要求：Linux 5.6+（statx opcode），5.18+（setup_submit_all）。
-//! 不可用环境（WSL2/老内核/容器 seccomp 拦截 io_uring）→ fallback LocalSync。
+//! Kernel requirements: Linux 5.6+ (statx opcode), 5.18+ (setup_submit_all).
+//! If unavailable (WSL2, older kernels, or container seccomp blocking io_uring), fall back to LocalSync.
 //!
-//! # 生命周期铁律
+//! # Lifetime requirements
 //!
-//! `CString` + `MaybeUninit<libc::statx>` 必须存活到所有 CQE 收割完毕。
-//! 本模块用 `Vec::with_capacity(n)` 预分配容量，绝不触发 reallocation；
-//! `submit_and_wait(n)` 同步阻塞，返回时所有 SQE 已被内核消费，buffer 才可释放。
+//! `CString` and `MaybeUninit<libc::statx>` must remain alive until all CQEs have been reaped.
+//! This module preallocates with `Vec::with_capacity(n)` to prevent reallocation;
+//! `submit_and_wait(n)` blocks synchronously, and buffers can be released only after it returns and the kernel has consumed all SQEs.
 
 #![cfg(all(
     target_os = "linux",
@@ -23,7 +23,7 @@
         target_arch = "powerpc64",
     ),
 ))]
-// io-uring 0.7.x 预编译 sys.rs 白名单（上游 src/sys/mod.rs:18-33），超出范围触发 compile_error。
+// io-uring 0.7.x prebuilt sys.rs architecture allowlist (upstream src/sys/mod.rs:18-33); other targets trigger compile_error.
 
 use crate::core::unix_dir_enum::{LinuxDirEntryOwned, LinuxStatxResults};
 use io_uring::{opcode, types, IoUring};
@@ -34,40 +34,40 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
 use std::sync::OnceLock;
 
-// io_uring::types::statx 是 0 字节不透明占位符（doc: "use libc::statx instead"）。
-// SQE 只传递指针值给内核，内核按 Linux statx ABI 解读 buffer。
-// 因此 *mut libc::statx as *mut types::statx 是安全的：两者共享相同的内核 ABI 布局，
-// types::statx 仅用于满足 io_uring crate 的类型签名。
+// io_uring::types::statx is a zero-sized opaque placeholder (docs: "use libc::statx instead").
+// The SQE passes only a pointer to the kernel, which interprets the buffer according to the Linux statx ABI.
+// Therefore, casting *mut libc::statx to *mut types::statx is safe: both use the same kernel ABI layout,
+// and types::statx is used only to satisfy the io_uring crate's type signature.
 
-/// io_uring 实例的 SQ/CQ 深度。
+/// SQ/CQ depth of an io_uring instance.
 ///
-/// 256 覆盖大多数目录的批量大小；超过则分批（每批一个 ring）。
-/// ring 创建本身是一次 `io_uring_setup` 系统调用，不宜过大以减少内核内存占用。
+/// 256 covers the batch size of most directories; larger batches are split (one ring per batch).
+/// Ring creation itself requires an `io_uring_setup` syscall, so avoid larger rings to reduce kernel memory use.
 const RING_SIZE: u32 = 256;
 
-/// 启用 io_uring 的最小批量阈值。
+/// Minimum batch size for enabling io_uring.
 ///
-/// 批量小于此值时 io_uring 的 setup + submit 开销大于 N 次 fstatat，
-/// 调用方应走 LocalSync 路径（参考 Windows batch_query_nlinks 实践）。
+/// Below this batch size, io_uring setup and submission cost more than N fstatat calls,
+/// so callers should use the LocalSync path (based on the Windows batch_query_nlinks experience).
 pub const MIN_BATCH_FOR_IO_URING: usize = 8;
 
-/// 进程级 io_uring 可用性探测结果（懒求值，仅探测一次）。
+/// Process-wide io_uring availability result (lazy evaluation; probed only once).
 ///
-/// 探测失败的环境（WSL2、seccomp 拦截、< 5.18 内核）永久禁用 io_uring 路径，
-/// 避免每次目录枚举都触发失败的 ring 创建。
+/// Permanently disable io_uring on environments where probing fails (WSL2, seccomp blocking, or kernels older than 5.18),
+/// avoiding a failed ring creation on every directory enumeration.
 static IO_URING_AVAILABLE: OnceLock<bool> = OnceLock::new();
 
-/// 返回 io_uring 是否在当前内核可用。
+/// Return whether io_uring is available on the current kernel.
 ///
-/// 用 `setup_submit_all` + 单 SQE 探测，失败即不可用。
-/// 结果缓存于 `OnceLock`，第二次调用直接返回缓存值。
+/// Probe with `setup_submit_all` and a single SQE; failure means it is unavailable.
+/// The result is cached in `OnceLock`, so subsequent calls return it directly.
 pub fn io_uring_enabled() -> bool {
     *IO_URING_AVAILABLE.get_or_init(probe_io_uring)
 }
 
-/// 探测 io_uring 可用性（实际执行 ring 创建）。
+/// Probe io_uring availability by actually creating a ring.
 ///
-/// 显式指定 Entry 类型参数，避免 0.7.x 版本在 Entry / Entry128 多候选下推衍失败。
+/// Specify the Entry type parameters explicitly to avoid inference failures with the multiple Entry / Entry128 candidates in version 0.7.x.
 fn probe_io_uring() -> bool {
     use io_uring::squeue::Entry as SEntry;
     use io_uring::cqueue::Entry as CEntry;
@@ -77,31 +77,31 @@ fn probe_io_uring() -> bool {
         .is_ok()
 }
 
-/// 批量 STATX via io_uring。
+/// Run batched STATX via io_uring.
 ///
-/// 对 `entries` 中每个有合法 name 的条目提交一个 Statx SQE，一次 submit_and_wait
-/// 收割所有 CQE。成功的条目（`cqe.result() == 0`）写入结果向量对应槽位；
-/// 失败的条目（含 NUL byte 跳过、SQE 提交失败、CQE result < 0）保持 `None`，
-/// 调用方降级到 d_type 推断 + per-entry statx/fstatat fallback。
+/// Submit one Statx SQE for each entry in `entries` with a valid name, then reap all CQEs with one submit_and_wait.
+/// Successful entries (`cqe.result() == 0`) are written to their corresponding result slots;
+/// failed entries (including skipped NUL bytes, SQE submission failures, and CQE result < 0) remain `None`,
+/// so the caller can fall back to d_type inference and per-entry statx/fstatat.
 ///
-/// # 算法
+/// # Algorithm
 ///
-/// 1. 按 `RING_SIZE` 分批（每批一个新 ring，避免长生命周期 ring 的状态管理）
-/// 2. 每批：构造 N 个 CString（持有路径）+ N 个 zeroed `MaybeUninit<statx>` buffer
-/// 3. 为每个有效 name push 一个 Statx SQE，`user_data = 本批内本地索引`
-/// 4. `submit_and_wait(submitted)` 阻塞直到全部完成
-/// 5. 遍历 CQE：result==0 则 `assume_init` 后写入 entries
+/// 1. Split into batches of `RING_SIZE` (create a new ring per batch to avoid long-lived ring state management).
+/// 2. For each batch, create N CStrings (holding the paths) and N zeroed `MaybeUninit<statx>` buffers.
+/// 3. Push one Statx SQE per valid name, with `user_data` set to its local index in the batch.
+/// 4. `submit_and_wait(submitted)` blocks until all requests finish.
+/// 5. Iterate over the CQEs: for result==0, call `assume_init` and write the result to entries.
 ///
-/// # 错误处理
+/// # Error handling
 ///
-/// ring 创建失败 → 返回 `Err`，调用方应 fallback 到 LocalSync（不调用本函数）。
-/// submit_and_wait 失败 → 返回 `Err`，已写入的结果保留，未完成的条目保持 None。
+/// Ring creation failure -> return `Err`; callers should fall back to LocalSync (do not call this function).
+/// submit_and_wait failure -> return `Err`; already-written results are retained, and incomplete entries remain None.
 ///
 /// # Safety
 ///
-/// - `Vec::with_capacity(n)` 保证 statx_bufs 不 reallocation
-/// - CString 存在于 cstrings Vec 中，作用域覆盖到 submit_and_wait 之后
-/// - `assume_init` 仅在 CQE result==0 时调用（内核已写入完整 statx）
+/// - `Vec::with_capacity(n)` ensures statx_bufs is not reallocated.
+/// - CStrings remain in the cstrings Vec until after submit_and_wait returns.
+/// - Call `assume_init` only when CQE result==0 (the kernel has written a complete statx).
 pub fn batch_statx_via_io_uring(
     entries: &mut [LinuxDirEntryOwned],
     dirfd: RawFd,
@@ -113,17 +113,17 @@ pub fn batch_statx_via_io_uring(
     results.results.clear();
     results.results.resize_with(entries.len(), || None);
 
-    // 分批处理，每批最多 RING_SIZE 个条目
+    // Process in batches of at most RING_SIZE entries.
     for chunk_start in (0..entries.len()).step_by(RING_SIZE as usize) {
         let chunk_end = (chunk_start + RING_SIZE as usize).min(entries.len());
         let chunk = &mut entries[chunk_start..chunk_end];
-        // 单批失败不影响已完成的批；但 record 错误让调用方知道整体不完整
+        // A failed batch does not affect completed batches, but record the error so the caller knows the result is incomplete.
         batch_statx_chunk(chunk, chunk_start, dirfd, results)?;
     }
     Ok(())
 }
 
-/// 处理一批（≤ RING_SIZE）条目的 STATX。
+/// Run STATX for one batch of at most RING_SIZE entries.
 fn batch_statx_chunk(
     entries: &mut [LinuxDirEntryOwned],
     chunk_start: usize,
@@ -136,23 +136,23 @@ fn batch_statx_chunk(
     let mut ring: IoUring<io_uring::squeue::Entry, io_uring::cqueue::Entry> =
         IoUring::builder().setup_submit_all().build(n as u32)?;
 
-    // 预分配容量，绝不触发 reallocation（指针稳定性铁律）
-    // CString 堆分配，Vec<CString> 移动 CString 不影响底层 buffer
+    // Preallocate capacity and never reallocate (pointer stability is essential).
+    // CString uses a heap allocation, so moving a CString in Vec<CString> does not move its underlying buffer.
     let mut cstrings: Vec<Option<CString>> = Vec::with_capacity(n);
-    // statx_bufs 内联存 statx（~256 字节），Vec reallocation 会让指针失效
-    // with_capacity(n) + 仅 push n 个 → 永不 reallocate
+    // statx_bufs stores statx inline (~256 bytes); Vec reallocation would invalidate pointers.
+    // with_capacity(n) followed by at most n pushes guarantees no reallocation.
     let mut statx_bufs: Vec<MaybeUninit<libc::statx>> = Vec::with_capacity(n);
     for _ in 0..n {
-        // zeroed() 保证未填充字段是 0（statx_mask=0 即"无字段填充"，是合法状态）
+        // zeroed() ensures unfilled fields are 0 (statx_mask=0, meaning "no fields filled", is valid).
         statx_bufs.push(MaybeUninit::zeroed());
     }
 
-    // 提交索引 → entry 索引映射（因 NUL byte 跳过的 entry 不入 ring）
+    // Map submission indices to entry indices (entries skipped due to NUL bytes are not submitted).
     let mut local_to_entry: Vec<usize> = Vec::with_capacity(n);
     let mut submitted = 0usize;
 
     for (entry_idx, entry) in entries.iter().enumerate() {
-        // NUL byte 跳过：CString::new 失败
+        // Skip NUL bytes: CString::new fails.
         let cstr = match CString::new(entry.name.as_bytes()) {
             Ok(c) => c,
             Err(_) => {
@@ -165,7 +165,7 @@ fn batch_statx_chunk(
         let sqe = opcode::Statx::new(
             types::Fd(dirfd),
             cstr.as_ptr(),
-            // SAFETY: types::statx 是 0 字节不透明占位符，SQE 只传指针值给内核。
+            // SAFETY: types::statx is a zero-sized opaque placeholder; the SQE passes only a pointer to the kernel.
             statx_bufs[local_idx].as_mut_ptr() as *mut types::statx,
         )
         .flags(libc::AT_SYMLINK_NOFOLLOW)
@@ -173,7 +173,7 @@ fn batch_statx_chunk(
         .build()
         .user_data(local_idx as u64);
 
-        // SAFETY: sqe 由合法 opcode 构造，仅写入 SQ 槽位
+        // SAFETY: sqe was built with a valid opcode and is written only to an SQ slot.
         match unsafe { ring.submission().push(&sqe) } {
             Ok(()) => {
                 cstrings.push(Some(cstr));
@@ -181,7 +181,7 @@ fn batch_statx_chunk(
                 submitted += 1;
             }
             Err(_) => {
-                // SQ 满（不应发生，因 ring depth = n）：停止提交，已提交的继续
+                // SQ is full (unexpected because ring depth = n): stop submitting, then continue with submitted requests.
                 cstrings.push(None);
                 break;
             }
@@ -192,25 +192,25 @@ fn batch_statx_chunk(
         return Ok(());
     }
 
-    // 阻塞直到所有提交的 SQE 完成。setup_submit_all 保证单 SQE 失败不中断整批。
+    // Block until all submitted SQEs complete. setup_submit_all ensures one failed SQE does not interrupt the batch.
     ring.submit_and_wait(submitted)?;
 
-    // 收割 CQE：result==0 → 内核已写入完整 statx；result<0 → 失败，保持 None
+    // Reap CQEs: result==0 means the kernel wrote a complete statx; result<0 means failure, so leave None.
     for cqe in ring.completion() {
         let local_idx = cqe.user_data() as usize;
         if local_idx >= local_to_entry.len() {
-            continue; // 不可能的 user_data，防御
+            continue; // Defensive handling for an unexpected user_data value.
         }
         if cqe.result() == 0 {
-            // SAFETY: CQE result==0 → 内核已写入 statx_bufs[local_idx] 完整内容
+            // SAFETY: CQE result==0 means the kernel wrote a complete value to statx_bufs[local_idx].
             let stx = unsafe { statx_bufs[local_idx].assume_init() };
             let entry_idx = local_to_entry[local_idx];
             results.results[chunk_start + entry_idx] = Some(stx);
         }
-        // result < 0 → result slot 保持 None，调用方走 fstatat fallback。
+        // result < 0: leave the result slot as None so the caller uses the fstatat fallback.
     }
 
-    // drop cstrings + statx_bufs 在函数返回时发生，此时 ring 已收割完毕，可安全释放。
+    // cstrings and statx_bufs are dropped when this function returns; all CQEs have been reaped, so they can be safely released.
     Ok(())
 }
 
@@ -221,7 +221,7 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::MetadataExt;
 
-    /// 构造一个最小的 LinuxDirEntryOwned（仅 d_type + name，statx=None）
+    /// Construct a minimal LinuxDirEntryOwned (d_type and name only; statx=None).
     fn make_entry(d_type: u8, name: &str) -> LinuxDirEntryOwned {
         LinuxDirEntryOwned {
             d_type,
@@ -229,10 +229,10 @@ mod tests {
         }
     }
 
-    /// 在 tempdir 创建若干文件，用 io_uring 批量 statx 后验证 stx_ino 与 fs::stat 一致。
+    /// Create several files in a tempdir, batch-stat them with io_uring, and verify stx_ino matches fs::stat.
     #[test]
     fn test_batch_statx_real_dir() {
-        // io_uring 不可用则跳过（CI 应为 ubuntu-latest 5.18+ 内核）
+        // Skip if io_uring is unavailable (CI should use an ubuntu-latest kernel >= 5.18).
         if !io_uring_enabled() {
             eprintln!("skip: io_uring not available on this kernel");
             return;
@@ -243,18 +243,18 @@ mod tests {
             std::process::id()
         ));
         fs::create_dir_all(&tmp).unwrap();
-        // 清理保护
+        // Cleanup guard.
         let _guard = scopeguard::guard(tmp.clone(), |p| {
             let _ = fs::remove_dir_all(p);
         });
 
-        // 创建 3 个文件
+        // Create three files.
         let file_names = ["alpha.txt", "beta.bin", "gamma.md"];
         for name in &file_names {
             fs::write(tmp.join(name), b"x").unwrap();
         }
 
-        // 打开目录 fd
+        // Open the directory fd.
         let cstr = CString::new(tmp.as_os_str().as_bytes()).unwrap();
         let fd = unsafe {
             libc::open(
@@ -264,23 +264,23 @@ mod tests {
         };
         assert!(fd >= 0, "open dir failed");
 
-        // 构造 entries
+        // Construct entries.
         let mut entries: Vec<LinuxDirEntryOwned> =
             file_names.iter().map(|n| make_entry(libc::DT_REG, n)).collect();
 
-        // 执行批量 statx
+        // Run batched statx.
         let mut statx_results = LinuxStatxResults::default();
         let result = batch_statx_via_io_uring(&mut entries, fd, &mut statx_results);
         unsafe { libc::close(fd) };
 
         if result.is_err() {
-            // io_uring 提交失败：CI 环境 seccomp 拦截，跳过断言
+            // io_uring submission failed (seccomp may block it in CI); skip the assertions.
             eprintln!("skip: batch_statx failed: {:?}", result);
             return;
         }
         assert!(result.is_ok());
 
-        // 验证：每个 entry 应有 statx，且 stx_ino 与 fs::stat 一致
+        // Verify that each entry has statx and that stx_ino matches fs::stat.
         for (name, statx) in file_names.iter().zip(statx_results.results.iter()) {
             let statx = statx.as_ref().expect("statx should be filled for existing file");
             let path = tmp.join(name);
@@ -291,9 +291,9 @@ mod tests {
                 "inode mismatch for {}: io_uring={} fs={}",
                 name, statx.stx_ino, fs_ino
             );
-            // size 应为 1（写了 "x"）
+            // Size should be 1 (the file contains "x").
             assert_eq!(statx.stx_size, 1, "size mismatch for {}", name);
-            // mode 应为 regular file
+            // Mode should indicate a regular file.
             assert_eq!(
                 statx.stx_mode & libc::S_IFMT as u16,
                 libc::S_IFREG as u16,
@@ -303,7 +303,7 @@ mod tests {
         }
     }
 
-    /// 空批量 → 立即返回 Ok，不创建 ring。
+    /// An empty batch returns Ok immediately without creating a ring.
     #[test]
     fn test_batch_statx_empty_noop() {
         let mut entries: Vec<LinuxDirEntryOwned> = Vec::new();
@@ -312,7 +312,7 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    /// 包含 NUL byte 的 name → 跳过该条目，其余正常处理。
+    /// An entry with a NUL byte in its name is skipped; the remaining entries are processed normally.
     #[test]
     fn test_batch_statx_skips_nul_byte_name() {
         if !io_uring_enabled() {
@@ -339,7 +339,7 @@ mod tests {
         };
         assert!(fd >= 0);
 
-        // 一个合法 + 一个含 NUL byte（CString::new 失败 → 跳过）
+        // One valid name and one containing a NUL byte (CString::new fails, so it is skipped).
         let mut entries = vec![
             make_entry(libc::DT_REG, "valid.txt"),
             make_entry(libc::DT_REG, "bad\u{0}name"),
@@ -354,7 +354,7 @@ mod tests {
             return;
         }
 
-        // 第一个应填充，第二个应保持 None（CString::new 失败）
+        // The first result should be filled; the second should remain None (CString::new failed).
         assert!(statx_results.results[0].is_some(), "valid entry should be filled");
         assert!(
             statx_results.results[1].is_none(),
@@ -362,7 +362,7 @@ mod tests {
         );
     }
 
-    /// 非目录 fd → CQE error，结果槽位保持 None。
+    /// A non-directory fd produces a CQE error, leaving result slots as None.
     #[test]
     fn test_batch_statx_nonexistent_files_yields_none_statx() {
         if !io_uring_enabled() {
@@ -370,7 +370,7 @@ mod tests {
             return;
         }
 
-        // 用 /dev/null 作为 dirfd（不是目录）—— 期望 CQE 返回 -ENOTDIR
+        // Use /dev/null as dirfd (it is not a directory); expect the CQE to return -ENOTDIR.
         let cstr = CString::new("/dev/null".as_bytes()).unwrap();
         let fd = unsafe {
             libc::open(
@@ -392,7 +392,7 @@ mod tests {
         let _result = batch_statx_via_io_uring(&mut entries, fd, &mut statx_results);
         unsafe { libc::close(fd) };
 
-        // statx 应全部为 None（CQE 错误）
+        // All statx results should be None (CQE errors).
         for i in 0..entries.len() {
             assert!(
                 statx_results.results[i].is_none(),
@@ -413,7 +413,7 @@ mod tests {
         assert!(RING_SIZE <= 4096);
     }
 
-    /// 验证 io_uring_enabled 是幂等的（OnceLock 保证只探测一次）。
+    /// Verify that io_uring_enabled is idempotent (OnceLock ensures it is probed only once).
     #[test]
     fn test_io_uring_enabled_idempotent() {
         let a = io_uring_enabled();
@@ -421,7 +421,7 @@ mod tests {
         assert_eq!(a, b);
     }
 
-    // ── 最小 scopeguard（与 unix_dir_enum.rs 内联模式对齐）──────────────────
+    // ── Minimal scopeguard (matches the inline pattern in unix_dir_enum.rs) ──────────────────
     #[cfg(test)]
     mod scopeguard {
         pub struct Guard<T, F: FnMut(T)> {

@@ -14,7 +14,7 @@ fn permission_denied_dir() {
     dir.touch("accessible/file.txt");
     dir.touch("accessible/inaccessible/secret.txt");
 
-    // 移除子目录的执行权限（无法进入）
+    // Remove execute permission from the subdirectory (cannot enter it).
     std::fs::set_permissions(
         dir.join("accessible/inaccessible"),
         std::fs::Permissions::from_mode(0o000),
@@ -24,13 +24,13 @@ fn permission_denied_dir() {
     let wd = WalkDir::new(dir.path()).sort(true);
     let r = dir.run_recursive(wd);
 
-    // 应该有错误（无法读 inaccessible 目录）
+    // There should be an error (the inaccessible directory cannot be read).
     assert!(!r.errs().is_empty(), "expected permission errors");
 
-    // 但仍然能读取可访问的条目
+    // Accessible entries should still be readable.
     assert!(r.ents().len() >= 3, "expected >= 3 accessible entries");
 
-    // 恢复权限以便 TempDir 可以清理
+    // Restore permissions so TempDir can clean up.
     std::fs::set_permissions(
         dir.join("accessible/inaccessible"),
         std::fs::Permissions::from_mode(0o755),
@@ -48,7 +48,7 @@ fn permission_denied_file() {
     dir.touch("readable.txt");
     dir.touch("unreadable.txt");
 
-    // 移除文件读权限
+    // Remove read permission from the file.
     std::fs::set_permissions(
         dir.join("unreadable.txt"),
         std::fs::Permissions::from_mode(0o000),
@@ -60,13 +60,13 @@ fn permission_denied_file() {
         .parallelism(Parallelism::Serial);
     let r = dir.run_recursive(wd);
 
-    // 文件仍然会被发现（文件名可读），但 metadata 可能失败
+    // The file should still be found (its name is readable), but metadata retrieval may fail.
     assert!(
         r.ents().len() >= 3,
         "expected >= 3 entries including root"
     );
 
-    // 恢复权限
+    // Restore permissions.
     std::fs::set_permissions(
         dir.join("unreadable.txt"),
         std::fs::Permissions::from_mode(0o644),
@@ -97,13 +97,13 @@ fn permission_denied_parallel() {
         .sort(true);
     let r = dir.run_recursive(wd);
 
-    // 应该有错误
+    // There should be an error.
     assert!(
         !r.errs().is_empty(),
         "expected permission errors in parallel mode"
     );
 
-    // 可见文件应该仍然被找到
+    // Visible files should still be found.
     let paths: Vec<_> = r.ents().iter().map(|e| e.path().to_path_buf()).collect();
     assert!(
         paths
@@ -113,7 +113,7 @@ fn permission_denied_parallel() {
         paths
     );
 
-    // 恢复权限
+    // Restore permissions.
     std::fs::set_permissions(
         dir.join("a/blocked"),
         std::fs::Permissions::from_mode(0o755),

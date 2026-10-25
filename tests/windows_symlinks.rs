@@ -5,11 +5,11 @@ use jwalk_meta::*;
 #[cfg(windows)]
 use util::Dir;
 
-/// Windows symlink 测试需要管理员权限或开发者模式。
-/// 普通用户运行 `cargo test -- --ignored` 执行这些测试。
+/// Windows symlink tests require administrator privileges or Developer Mode.
+/// Regular users can run these tests with `cargo test -- --ignored`.
 #[cfg(windows)]
 #[test]
-#[ignore] // 需要 SeCreateSymbolicLinkPrivilege（管理员/开发者模式）
+#[ignore] // Requires SeCreateSymbolicLinkPrivilege (administrator/Developer Mode).
 fn windows_symlink_dir_nofollow() {
     let dir = Dir::tmp();
     dir.mkdirp("target");

@@ -1,14 +1,14 @@
-//! Linux getdents64 直调枚举。
+//! Direct Linux getdents64 directory enumeration.
 //!
-//! 替代 `std::fs::read_dir`，单次系统调用获取多条目，并支持流式子目录分发。
-//! 仅 Linux 编译：macOS 用 `getdirentries64`（签名不同），其他 Unix 不一定支持。
+//! Replaces `std::fs::read_dir`, fetching multiple entries per syscall and supporting streaming subdirectory dispatch.
+//! Compiled only on Linux: macOS uses `getdirentries64` (with a different signature), and other Unix systems may not support it.
 //!
-//! # 核心要点
+//! # Key points
 //!
-//! - 64KB thread_local 缓冲区复用，与 Windows `TLS_BUFFER` 模式对齐
-//! - `linux_dirent64::d_type` 短路判断 dir/file/symlink，避免 `fstatat`（仅 DT_UNKNOWN fallback）
-//! - `fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)` 替代 `fs::metadata`，省路径解析
-//! - 返回 `DirFdGuard` 保留 fd，供后续 `fstatat` 使用
+//! - Reuse a 64 KB thread-local buffer, matching the Windows `TLS_BUFFER` pattern.
+//! - Use `linux_dirent64::d_type` to identify dirs/files/symlinks without `fstatat` (except for the DT_UNKNOWN fallback).
+//! - Use `fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)` instead of `fs::metadata` to avoid path resolution.
+//! - Return a `DirFdGuard` to keep the fd open for subsequent `fstatat` calls.
 
 use std::ffi::{OsStr, OsString};
 use std::io;
@@ -16,31 +16,31 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
 use std::path::Path;
 
-// Linux getdents64 返回的目录条目（ABI 布局，不依赖 libc 是否导出 linux_dirent64）。
-// 与 linux_dirent64 ABI 严格对应：d_ino(8) | d_off(8) | d_reclen(2) | d_type(1) | d_name[NUL].
+// Directory entry returned by Linux getdents64 (ABI layout; does not depend on libc exporting linux_dirent64).
+// Matches the linux_dirent64 ABI exactly: d_ino(8) | d_off(8) | d_reclen(2) | d_type(1) | d_name[NUL].
 #[repr(C)]
 struct LinuxDirent64 {
     d_ino: u64,
     d_off: u64,
     d_reclen: u16,
     d_type: u8,
-    // d_name 变长 NUL 终止字节串，起始偏移 = 19（由 kernel ABI 固定，不由 Rust 结构计算）
+    // d_name is a variable-length NUL-terminated byte string at offset 19 (fixed by the kernel ABI, not computed from the Rust struct).
 }
 
-/// d_name 在 LinuxDirent64 中的固定偏移（kernel ABI 保证，不随编译器对齐策略变化）。
+/// Fixed offset of d_name in LinuxDirent64 (guaranteed by the kernel ABI; independent of compiler alignment).
 const DIRENT_NAME_OFFSET: usize = 19;
 
-/// getdents64 缓冲区大小（64KB）。
-/// 单次 syscall 在大目录上可返回数百到数千条目，与 Windows TLS_BUFFER 对齐。
+/// getdents64 buffer size (64 KB).
+/// A single syscall can return hundreds to thousands of entries from a large directory, matching the Windows TLS_BUFFER size.
 const DENTS_BUF_SIZE: usize = 64 * 1024;
 
-// thread_local 缓冲区，避免每次枚举分配 64KB。
+// Thread-local buffer to avoid allocating 64 KB on every enumeration.
 thread_local! {
     static TLS_BUFFER: std::cell::RefCell<Vec<u8>> =
         std::cell::RefCell::new(vec![0u8; DENTS_BUF_SIZE]);
 }
 
-/// 借用 TLS buffer（不足 64KB 时 resize）。
+/// Borrow the TLS buffer (resize if it is smaller than 64 KB).
 fn with_tls_buffer<R>(f: impl FnOnce(&mut [u8]) -> R) -> R {
     TLS_BUFFER.with(|cell| {
         let mut buf = cell.borrow_mut();
@@ -51,7 +51,7 @@ fn with_tls_buffer<R>(f: impl FnOnce(&mut [u8]) -> R) -> R {
     })
 }
 
-/// 目录 fd 守卫。Drop 时自动 `close`，确保 fd 不泄漏。
+/// Directory fd guard. Automatically calls `close` on drop to prevent fd leaks.
 pub struct DirFdGuard(RawFd);
 
 impl DirFdGuard {
@@ -63,7 +63,7 @@ impl DirFdGuard {
 
 impl Drop for DirFdGuard {
     fn drop(&mut self) {
-        // SAFETY: 构造时 fd >= 0；close 不会 panic，错误也无从恢复。
+        // SAFETY: fd was >= 0 when constructed; close does not panic, and errors cannot be recovered from here.
         unsafe {
             libc::close(self.0);
         }
@@ -105,17 +105,17 @@ impl LinuxStatxResults {
     }
 }
 
-/// 已收集的目录条目（拥有化，可越过 buffer 复用）。
+/// Collected directory entry (owned, so it can outlive buffer reuse).
 pub struct LinuxDirEntryOwned {
     pub d_type: u8,
     pub name: OsString,
 }
 
-/// 打开目录获取 fd（O_RDONLY | O_DIRECTORY | O_CLOEXEC）。
+/// Open a directory and obtain an fd (O_RDONLY | O_DIRECTORY | O_CLOEXEC).
 fn open_dir_fd(path: &Path) -> io::Result<RawFd> {
     let cstr = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL byte"))?;
-    // SAFETY: cstr 来自合法 CString（NUL 终止）；标志位组合为标准 POSIX。
+    // SAFETY: cstr is a valid CString (NUL-terminated); the flag combination is standard POSIX.
     let fd = unsafe {
         libc::open(
             cstr.as_ptr(),
@@ -129,9 +129,9 @@ fn open_dir_fd(path: &Path) -> io::Result<RawFd> {
     }
 }
 
-/// 调用 getdents64 syscall。
+/// Call the getdents64 syscall.
 ///
-/// SAFETY: `fd` 必须为打开的目录 fd；`buf` 必须有 `buf.len()` 字节可写。
+/// SAFETY: `fd` must be an open directory fd; `buf` must have `buf.len()` writable bytes.
 unsafe fn syscall_getdents64(fd: RawFd, buf: &mut [u8]) -> io::Result<libc::c_long> {
     let n = libc::syscall(
         libc::SYS_getdents64,
@@ -146,16 +146,16 @@ unsafe fn syscall_getdents64(fd: RawFd, buf: &mut [u8]) -> io::Result<libc::c_lo
     }
 }
 
-/// 解析 getdents64 写入 buffer 的前 `len` 字节，对每条目调用 `on_entry(d_type, name)`。
+/// Parse the first `len` bytes written to buffer by getdents64 and call `on_entry(d_type, name)` for each entry.
 ///
-/// 跳过 "." 和 ".." 由调用方决定；本函数仅做字节级解析。
+/// The caller decides whether to skip "." and ".."; this function only parses bytes.
 ///
-/// SAFETY: `buf[..len]` 必须来自成功的 getdents64 调用，由完整 linux_dirent64 记录组成。
+/// SAFETY: `buf[..len]` must come from a successful getdents64 call and consist of complete linux_dirent64 records.
 unsafe fn parse_dirents(buf: &[u8], len: usize, mut on_entry: impl FnMut(u8, &OsStr)) {
     let mut offset = 0usize;
     let header_size = std::mem::size_of::<LinuxDirent64>();
     while offset + header_size <= len {
-        // SAFETY: offset 后至少有 header_size 字节。LinuxDirent64 为 repr(C)，字段不填充。
+        // SAFETY: At least header_size bytes remain after offset. LinuxDirent64 is repr(C) and its fields have no padding.
         let entry_ptr = buf.as_ptr().add(offset) as *const LinuxDirent64;
         let entry = &*entry_ptr;
         let reclen = entry.d_reclen as usize;
@@ -163,8 +163,8 @@ unsafe fn parse_dirents(buf: &[u8], len: usize, mut on_entry: impl FnMut(u8, &Os
             break;
         }
 
-        // d_name 在 header 后固定偏移 DIRENT_NAME_OFFSET（kernel ABI，不随结构布局变化）。
-        // SAFETY: getdents64 保证 d_name NUL 终止且整体在 reclen 范围内，strlen 不会越界。
+        // d_name starts at the fixed DIRENT_NAME_OFFSET after the header (kernel ABI, independent of struct layout).
+        // SAFETY: getdents64 guarantees d_name is NUL-terminated and within reclen, so strlen cannot go out of bounds.
         let name_ptr = buf.as_ptr().add(offset + DIRENT_NAME_OFFSET) as *const libc::c_char;
         let name_len = libc::strlen(name_ptr);
         let name_bytes = std::slice::from_raw_parts(name_ptr as *const u8, name_len);
@@ -176,9 +176,9 @@ unsafe fn parse_dirents(buf: &[u8], len: usize, mut on_entry: impl FnMut(u8, &Os
     }
 }
 
-/// 非流式枚举：一次性收集所有条目，返回 fd 守卫供后续 `fstatat` 使用。
+/// Non-streaming enumeration: collect all entries at once and return an fd guard for subsequent `fstatat` calls.
 ///
-/// 与 `std::fs::read_dir` 行为对等的回调版本，但单次 syscall 批量获取。
+/// Callback-based version with behavior equivalent to `std::fs::read_dir`, but using a single syscall.
 pub fn enumerate_dir_unix(
     path: &Path,
     capacity: usize,
@@ -208,13 +208,13 @@ pub fn enumerate_dir_unix(
     result.map(|_| (guard, entries))
 }
 
-/// 流式枚举：发现子目录立即调用 `on_subdir` 调度，所有条目（含子目录）也加入返回 Vec。
+/// Streaming enumeration: call `on_subdir` immediately when a subdirectory is found, and also add every entry (including subdirectories) to the returned Vec.
 ///
-/// 与 Windows 端 `enumerate_dir_streaming` 对齐：
-/// 1. 64KB TLS buffer 复用
-/// 2. 单次 getdents64 批量查询
-/// 3. 对每个子目录条目调用 `on_subdir(&LinuxDirEntryOwned)` 回调
-/// 4. 所有条目（文件 + 目录）保留在返回 Vec，供后续 DirEntry 构造
+/// Matches the Windows `enumerate_dir_streaming` implementation:
+/// 1. Reuse a 64 KB TLS buffer.
+/// 2. Fetch entries in a single getdents64 call.
+/// 3. Call `on_subdir(&LinuxDirEntryOwned)` for each subdirectory entry.
+/// 4. Retain all entries (files and directories) in the returned Vec for subsequent DirEntry construction.
 pub fn enumerate_dir_unix_streaming(
     path: &Path,
     capacity: usize,
@@ -253,13 +253,13 @@ pub fn enumerate_dir_unix_streaming(
     result.map(|_| (guard, entries))
 }
 
-/// 通过 `fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)` 获取 stat。
+/// Get stat using `fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)`.
 ///
-/// 失败返回 `io::Error`，调用方可降级（仅用 d_type 构造 FileType，metadata 留空）。
+/// Return `io::Error` on failure; the caller can fall back to constructing FileType from d_type and leaving metadata empty.
 pub fn fstatat_metadata(dirfd: RawFd, name: &OsStr) -> io::Result<libc::stat> {
     let cstr = std::ffi::CString::new(name.as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains NUL byte"))?;
-    // SAFETY: cstr NUL 终止；stat 出参 zeroed 初始化（即便 fstatat 失败也安全）。
+    // SAFETY: cstr is NUL-terminated; stat is zero-initialized (safe even if fstatat fails).
     let mut stat: libc::stat = unsafe { std::mem::zeroed() };
     let rc = unsafe {
         libc::fstatat(
@@ -286,18 +286,18 @@ fn entry_is_directory(dirfd: RawFd, d_type: u8, name: &OsStr) -> bool {
             .is_ok_and(|stat| (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR)
 }
 
-/// 通过 `statx(dirfd, name, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS|STATX_BTIME)` 同步获取 statx。
+/// Synchronously get statx using `statx(dirfd, name, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS|STATX_BTIME)`.
 ///
-/// 与 `fstatat_metadata` 的区别：statx 系统调用能拿 birth time (stx_btime)，fstatat 返回
-/// 的 POSIX `stat` 结构无 btime 字段。scandir 默认走 LocalSync 路径（fstatat fallback），
-/// gnu target 优先用本函数获取 btime，statx 失败才降级 fstatat。
+/// Unlike `fstatat_metadata`, the statx syscall can retrieve birth time (stx_btime); the POSIX `stat` structure returned by fstatat
+/// has no btime field. scandir defaults to the LocalSync path (fstatat fallback); GNU targets use this function to get btime
+/// and fall back to fstatat only if statx fails.
 ///
-/// 仅 gnu target：libc crate 不为 musl 导出 statx/statx_timestamp/STATX_*。
+/// GNU targets only: the libc crate does not export statx/statx_timestamp/STATX_* for musl.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub fn statx_metadata(dirfd: RawFd, name: &OsStr) -> io::Result<libc::statx> {
     let cstr = std::ffi::CString::new(name.as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "name contains NUL byte"))?;
-    // SAFETY: cstr NUL 终止；statx 出参 zeroed 初始化（即便 statx 失败也安全）。
+    // SAFETY: cstr is NUL-terminated; statx output is zero-initialized (safe even if statx fails).
     let mut statx: libc::statx = unsafe { std::mem::zeroed() };
     let rc = unsafe {
         libc::statx(
@@ -315,10 +315,10 @@ pub fn statx_metadata(dirfd: RawFd, name: &OsStr) -> io::Result<libc::statx> {
     }
 }
 
-/// 从 `d_type` 构造 `std::fs::FileType`。
+/// Construct `std::fs::FileType` from `d_type`.
 ///
-/// 常见类型（dir/reg/lnk/fifo/sock/blk/chr）直接映射；DT_UNKNOWN 返回 `None`，
-/// 调用方需 `fstatat` fallback 取 `st_mode`。
+/// Common types (dir/reg/lnk/fifo/sock/blk/chr) are mapped directly; DT_UNKNOWN returns `None`,
+/// and the caller must fall back to `fstatat` to get `st_mode`.
 pub fn file_type_from_dtype(d_type: u8) -> Option<std::fs::FileType> {
     let mode = match d_type {
         libc::DT_DIR => libc::S_IFDIR,
@@ -333,21 +333,21 @@ pub fn file_type_from_dtype(d_type: u8) -> Option<std::fs::FileType> {
     Some(file_type_from_mode(mode))
 }
 
-/// 从 st_mode 构造 FileType（用于 fstatat fallback 与 d_type → FileType 映射）。
+/// Construct FileType from st_mode (for the fstatat fallback and d_type -> FileType mapping).
 ///
-/// `std::fs::FileType` 在 Linux 上内部布局为 `{ mode: u32 }`（mode_t）但 stdlib 不暴露构造器。
-/// 不同 Linux 发行版 / 不同 Rust 版本上 FileType 可能有额外 padding（实测 Ubuntu 24.04 是 8 bytes）。
-/// 用字节 buffer + ptr::read 避免 transmute 的 size 等价要求：把 mode 写入 buffer 前 N 字节，
-/// 后续 padding 为零，不影响 FileType::is_dir/is_file 等 mode 位判断。
+/// On Linux, `std::fs::FileType` is internally laid out as `{ mode: u32 }` (mode_t), but stdlib exposes no constructor.
+/// FileType may have additional padding on different Linux distributions or Rust versions (measured as 8 bytes on Ubuntu 24.04).
+/// Use a byte buffer and ptr::read to avoid transmute's equal-size requirement: write mode to the first N bytes of the buffer,
+/// and leave the remaining padding zeroed; this does not affect mode-bit checks such as FileType::is_dir/is_file.
 pub fn file_type_from_mode(mode: libc::mode_t) -> std::fs::FileType {
     const FT_SIZE: usize = std::mem::size_of::<std::fs::FileType>();
     const MODE_SIZE: usize = std::mem::size_of::<libc::mode_t>();
-    // 编译期保证 buffer 能容下 mode_t
+    // Compile-time check that the buffer can hold mode_t.
     const _: () = assert!(FT_SIZE >= MODE_SIZE);
     let mut buf = [0u8; FT_SIZE];
     buf[..MODE_SIZE].copy_from_slice(&mode.to_ne_bytes());
-    // SAFETY: buf 已零初始化，前 MODE_SIZE 字节来自合法 mode_t；
-    // FileType 是 POD 类型，ptr::read 不产生 UB。
+    // SAFETY: buf is zero-initialized, and the first MODE_SIZE bytes come from a valid mode_t;
+    // FileType is a POD type, so ptr::read does not cause UB.
     unsafe { std::ptr::read(buf.as_ptr() as *const std::fs::FileType) }
 }
 
@@ -355,15 +355,15 @@ pub fn file_type_from_mode(mode: libc::mode_t) -> std::fs::FileType {
 mod tests {
     use super::*;
 
-    /// 构造一条 linux_dirent64 字节流写入 buffer（8 字节对齐）。
-    /// 布局：d_ino(8) | d_off(8) | d_reclen(2) | d_type(1) | d_name(NUL, padded)
+    /// Construct one linux_dirent64 byte record in the buffer (8-byte aligned).
+    /// Layout: d_ino(8) | d_off(8) | d_reclen(2) | d_type(1) | d_name(NUL, padded).
     fn make_dirent_bytes(d_type: u8, name: &str) -> Vec<u8> {
         let name_bytes = name.as_bytes();
         let name_with_nul_len = name_bytes.len() + 1;
-        // 头部固定 19 字节（d_ino 8 + d_off 8 + d_reclen 2 + d_type 1）。
+        // Header is fixed at 19 bytes (d_ino 8 + d_off 8 + d_reclen 2 + d_type 1).
         let header_len = 19;
         let total_len = header_len + name_with_nul_len;
-        // linux_dirent64 8 字节对齐（与 u64 字段对齐）。
+        // Align linux_dirent64 to 8 bytes (matching its u64 fields).
         let padded_len = (total_len + 7) & !7;
 
         let mut buf = vec![0u8; padded_len];
@@ -372,7 +372,7 @@ mod tests {
         buf[16..18].copy_from_slice(&(padded_len as u16).to_ne_bytes()); // d_reclen
         buf[18] = d_type; // d_type
         buf[19..19 + name_bytes.len()].copy_from_slice(name_bytes);
-        buf[19 + name_bytes.len()] = 0; // NUL 终止
+        buf[19 + name_bytes.len()] = 0; // NUL terminator.
         buf
     }
 
@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn test_parse_dirents_dot_entries_not_filtered() {
-        // parse_dirents 自身不跳过 "."/".."，由调用方决定。
+        // parse_dirents itself does not skip "."/".."; that is up to the caller.
         let mut buf = Vec::new();
         buf.extend(make_dirent_bytes(libc::DT_DIR, "."));
         buf.extend(make_dirent_bytes(libc::DT_DIR, ".."));
@@ -435,12 +435,12 @@ mod tests {
 
     #[test]
     fn test_parse_dirents_truncation_safe() {
-        // 不完整记录（reclen 越界）必须停止解析而非越界读取。
+        // Stop parsing on an incomplete record (reclen out of bounds) instead of reading out of bounds.
         let mut buf = make_dirent_bytes(libc::DT_REG, "truncated.txt");
-        // 截断最后 5 字节，让 reclen 越界
+        // Truncate the final 5 bytes to make reclen exceed the buffer.
         let trunc_len = buf.len() - 5;
         buf.truncate(trunc_len);
-        // 截断后 header 都不全，parse_dirents 不应触发任何回调或 panic。
+        // The truncated record no longer has a complete header; parse_dirents should not invoke callbacks or panic.
         let mut found = 0;
         unsafe {
             parse_dirents(&buf, buf.len(), |_, _| {
@@ -466,8 +466,8 @@ mod tests {
 
     #[test]
     fn test_file_type_from_mode_safety_assertion() {
-        // 验证 FileType 内部布局假设（同 Windows 端 file_type_from_attrs）。
-        // 若 stdlib 未来改变 FileType 布局，此处 panic 强迫重新评估 transmute。
+        // Verify the FileType internal-layout assumption (as in the Windows file_type_from_attrs implementation).
+        // If stdlib changes FileType's layout in the future, this panic forces a review of the transmute.
         assert_eq!(
             std::mem::size_of::<std::fs::FileType>(),
             std::mem::size_of::<libc::mode_t>(),
@@ -479,8 +479,8 @@ mod tests {
 
     #[test]
     fn test_dirent_layout_offsets() {
-        // 校验本模块定义的 LinuxDirent64 头部字段偏移（ABI 套图 linux_dirent64，不依赖 libc）。
-        // d_name 在 offset 19，但 Rust 结构中不含 d_name 字段，这里仅校验头部 4 字段。
+        // Verify header-field offsets for this module's LinuxDirent64 definition (models linux_dirent64 ABI without depending on libc).
+        // d_name is at offset 19, but the Rust struct does not contain a d_name field, so only the four header fields are checked here.
         assert_eq!(std::mem::offset_of!(LinuxDirent64, d_ino), 0);
         assert_eq!(std::mem::offset_of!(LinuxDirent64, d_off), 8);
         assert_eq!(std::mem::offset_of!(LinuxDirent64, d_reclen), 16);
@@ -488,8 +488,8 @@ mod tests {
         assert_eq!(DIRENT_NAME_OFFSET, 19);
     }
 
-    /// 流式 schedule 序号正确性：模拟一次 getdents64 返回 3 个子目录 + 2 个文件，
-    /// 验证 on_subdir 仅对子目录触发、返回 Vec 包含全部 5 条。
+    /// Verify streaming schedule indices: simulate one getdents64 call returning three subdirectories and two files,
+    /// and check that on_subdir runs only for subdirectories while the returned Vec contains all five entries.
     #[test]
     fn test_streaming_dispatches_only_subdirs() {
         let mut buf = Vec::new();
@@ -499,7 +499,7 @@ mod tests {
         buf.extend(make_dirent_bytes(libc::DT_REG, "f2"));
         buf.extend(make_dirent_bytes(libc::DT_DIR, "d3"));
 
-        // 直接驱动 parse_dirents + on_subdir 逻辑（绕过文件系统）
+        // Drive the parse_dirents + on_subdir logic directly (bypassing the filesystem).
         let mut subdir_names = Vec::new();
         let mut all_entries = Vec::new();
         unsafe {
@@ -522,7 +522,7 @@ mod tests {
         assert_eq!(all_entries.len(), 5);
     }
 
-    /// 端到端校验：在临时目录上跑 enumerate_dir_unix_streaming。
+    /// End-to-end check: run enumerate_dir_unix_streaming on a temporary directory.
     #[test]
     fn test_enumerate_dir_unix_streaming_on_tmpdir() {
         let tmp = std::env::temp_dir().join(format!(
@@ -530,7 +530,7 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&tmp).unwrap();
-        // 清理保护
+        // Cleanup guard.
         let _guard = scopeguard::guard(tmp.clone(), |p| {
             let _ = std::fs::remove_dir_all(p);
         });
@@ -545,11 +545,11 @@ mod tests {
             enumerate_dir_unix_streaming(&tmp, 16, |_| subdir_count += 1).unwrap();
         drop(guard);
 
-        // 至少 4 条目（2 subdir + 2 file，可能有别的进程临时文件，故 ≥）
+        // At least four entries (two subdirectories + two files; other processes may create temporary files, hence >=).
         assert!(entries.len() >= 4, "entries len = {}", entries.len());
         assert!(subdir_count >= 2, "subdir_count = {}", subdir_count);
 
-        // 所有条目类型合法
+        // All entry names should be valid.
         for e in &entries {
             assert!(!e.name.is_empty());
         }
@@ -581,7 +581,7 @@ mod tests {
     }
 }
 
-// scopeguard 没在 Cargo.toml，内联一个最小 Drop guard（仅测试用）
+// scopeguard is not in Cargo.toml, so define a minimal Drop guard inline (for tests only).
 #[cfg(test)]
 mod scopeguard {
     pub struct Guard<T, F: FnMut(T)> {

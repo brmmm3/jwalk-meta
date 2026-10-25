@@ -1,47 +1,47 @@
 # jwalk-meta
 
-高性能并行目录遍历库，专为大规模文件系统扫描优化。
+High-performance parallel directory traversal library optimized for large-scale filesystem scans.
 
-基于 [jwalk](https://github.com/Byron/jwalk) fork，在保留原有并行遍历能力的基础上，新增 Windows NT Native API 枚举、流式子目录分发和优先淹没调度算法。
+Forked from [jwalk](https://github.com/Byron/jwalk). It preserves the original parallel traversal capabilities and adds Windows NT Native API enumeration, streaming subdirectory dispatch, and priority-flood scheduling.
 
-## 特性
+## Features
 
-- **rayon 并行遍历** — 目录级并行，自动利用所有 CPU 核心
-- **NT Native API 枚举** (Windows) — 使用 `NtQueryDirectoryFileEx` + 64KB 批量缓冲区替代 `FindFirstFile/FindNextFile`，单次系统调用获取数百条目，大幅减少用户态-内核态切换
-- **流式子目录分发** — 枚举巨型目录时，每批 NtQuery 发现子目录立即推入调度队列，不等整个目录枚举完成。消除百万级目录的启动延迟
-- **优先淹没算法** — `weight = parent_weight + subdir_count`，子目录越多的分支获得越高调度优先级，自动将更多线程分配给"大水管"子树
-- **有序流式输出** — DFS 前序保证父目录先于子目录产出，OrderedMatcher 跟踪遍历游标
-- **元数据扩展** — 可选收集文件属性、时间戳、大小等元数据，避免二次 `stat` 调用
+- **rayon parallel traversal** — Directory-level parallelism automatically uses all CPU cores.
+- **NT Native API enumeration** (Windows) — Uses `NtQueryDirectoryFileEx` with a 64 KB batch buffer instead of `FindFirstFile/FindNextFile`. Each system call retrieves hundreds of entries, greatly reducing user/kernel transitions.
+- **Streaming subdirectory dispatch** — While enumerating a huge directory, subdirectories discovered in each NtQuery batch are immediately added to the scheduling queue instead of waiting for the entire directory to finish. This eliminates startup latency when traversing directories with millions of entries.
+- **Priority-flood scheduling** — `weight = parent_weight + subdir_count`. Branches with more subdirectories receive higher scheduling priority, automatically assigning more threads to the largest subtrees.
+- **Ordered streaming output** — DFS preorder ensures parent directories are emitted before their children; `OrderedMatcher` tracks the traversal cursor.
+- **Extended metadata** — Optionally collects file attributes, timestamps, sizes, and other metadata to avoid additional `stat` calls.
 
-## 性能
+## Performance
 
-实测环境：Windows 11，SMB 网络共享 (`Z:\测试`)
+Measured on Windows 11 using an SMB network share (`Z:\测试`).
 
 
-| 指标     | 数值            |
+| Metric       | Value           |
 | -------- | --------------- |
-| 总条目数 | 1,981,338       |
-| 目录数   | 412,935         |
-| 文件数   | 1,568,403       |
-| 总耗时   | 377 秒          |
-| 吞吐量   | 5,255 entries/s |
-| 首秒产出 | 15,007 entries  |
-| 错误数   | 0               |
+| Total entries | 1,981,338       |
+| Directories   | 412,935         |
+| Files         | 1,568,403       |
+| Total time    | 377 seconds     |
+| Throughput    | 5,255 entries/s |
+| First-second output | 15,007 entries |
+| Errors        | 0               |
 
-对比优化前：同目录扫描首 265 秒仅有 271 条产出（卡在单个巨型目录的阻塞枚举上）。
+Before optimization, the first 265 seconds of scanning the same directory produced only 271 entries (blocked while enumerating a single huge directory).
 
-## 安装
+## Installation
 
 ```toml
 [dependencies]
 jwalk-meta = "1.0"
 ```
 
-需要 Rust nightly 工具链。
+The Rust nightly toolchain is required.
 
-## 使用
+## Usage
 
-### 基本用法
+### Basic usage
 
 ```rust
 use jwalk_meta::WalkDir;
@@ -51,7 +51,7 @@ for entry in WalkDir::new("foo").sort(true) {
 }
 ```
 
-### 带元数据收集
+### Collecting metadata
 
 ```rust
 use jwalk_meta::WalkDir;
@@ -66,7 +66,7 @@ for entry in WalkDir::new("foo")
 }
 ```
 
-## 架构
+## Architecture
 
 ```
                     ┌─────────────┐
@@ -84,29 +84,29 @@ for entry in WalkDir::new("foo")
         │ +150     │ │ +2       │ │ +50      │
         └──────────┘ └──────────┘ └──────────┘
               ▲
-              │  优先淹没：子目录越多 → 权重越高 → 越多线程处理
+              │  Priority flood: more subdirectories → higher weight → more threads assigned
               │
-         BinaryHeap (max-heap) 调度
+         BinaryHeap (max-heap) scheduling
 ```
 
-### 核心组件
+### Core components
 
 
-| 组件                      | 文件                | 职责                                  |
+| Component                 | File                | Responsibility                       |
 | ------------------------- | ------------------- | ------------------------------------- |
-| `Weighted<T>`             | `weighted.rs`       | 带权重的调度单元，BinaryHeap max-heap |
-| `PriorityQueue`           | `priority_queue.rs` | 线程安全的优先级队列 + channel        |
-| `StreamingContext`        | `read_dir_iter.rs`  | 流式分发上下文，携带 parent_weight    |
-| `ReadDirIter`             | `read_dir_iter.rs`  | 并行遍历迭代器，流式/常规双模式       |
-| `enumerate_dir_streaming` | `nt_dir_enum.rs`    | NT Native API 流式枚举（Windows）     |
-| `OrderedQueue`            | `ordered_queue.rs`  | 有序输出队列，Strict/Relaxed 排序     |
+| `Weighted<T>`             | `weighted.rs`       | Weighted scheduling item for a BinaryHeap max-heap |
+| `PriorityQueue`           | `priority_queue.rs` | Thread-safe priority queue and channel |
+| `StreamingContext`        | `read_dir_iter.rs`  | Streaming dispatch context carrying `parent_weight` |
+| `ReadDirIter`             | `read_dir_iter.rs`  | Parallel traversal iterator with streaming and regular modes |
+| `enumerate_dir_streaming` | `nt_dir_enum.rs`    | NT Native API streaming enumeration (Windows) |
+| `OrderedQueue`            | `ordered_queue.rs`  | Ordered output queue with Strict/Relaxed ordering |
 
-## 致谢
+## Acknowledgments
 
-- [jwalk](https://github.com/Byron/jwalk) — 原始并行遍历框架
-- [walkdir](https://crates.io/crates/walkdir) — 流式迭代器 API 设计
-- [ignore](https://crates.io/crates/ignore) — 并行遍历思路
+- [jwalk](https://github.com/Byron/jwalk) — Original parallel traversal framework
+- [walkdir](https://crates.io/crates/walkdir) — Streaming iterator API design
+- [ignore](https://crates.io/crates/ignore) — Parallel traversal ideas
 
-## 许可证
+## License
 
 MIT

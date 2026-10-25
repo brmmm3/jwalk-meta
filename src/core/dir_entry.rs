@@ -43,19 +43,19 @@ pub struct DirEntry<C: ClientState> {
     pub metadata_ext: Option<MetaDataExt>,
     // True if [`follow_links`] is `true` AND was created from a symlink path.
     follow_link: bool,
-    // 符号链接祖先的 metadata identity 列表，用 Arc 共享避免 O(depth) 克隆。
-    // 循环检测通过预存的 identity (dev+ino / vol+file_index) 直接内存比较，
-    // 无需 O(depth) 次 fs::metadata 系统调用。
+    // Metadata identities for symlink ancestors, shared via Arc to avoid O(depth) cloning.
+    // Loop detection compares the precomputed identities (dev+ino / vol+file_index) in memory,
+    // avoiding O(depth) fs::metadata system calls.
     follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
     // Lazily cached full path (parent_path + file_name).
     cached_path: OnceLock<PathBuf>,
 }
 
 impl<C: ClientState> DirEntry<C> {
-    /// 从 NT Native API 获取的原始数据创建 DirEntry。
+    /// Create a DirEntry from raw data returned by the NT Native API.
     ///
-    /// 直接接受 `file_name`、`file_type` 和 `metadata`
-    /// 参数，无需从 `fs::DirEntry` 读取。
+    /// Accept `file_name`, `file_type`, and `metadata` directly,
+    /// without reading them from `fs::DirEntry`.
     pub(crate) fn from_raw(
         depth: usize,
         parent_path: Arc<Path>,
@@ -298,7 +298,7 @@ entry: &fs::DirEntry,
 
         if dir_entry.file_type.is_dir() {
             let target = fs::read_link(path).map_err(|err| Error::from_io(self.depth, err))?;
-            // 解析符号链接目标为绝对路径
+            // Resolve the symlink target to an absolute path.
             let resolved_target = if target.is_absolute() {
                 target
             } else {
@@ -306,13 +306,13 @@ entry: &fs::DirEntry,
             };
             let canonical_target = resolved_target.canonicalize().ok().unwrap_or(resolved_target);
 
-            // 使用 metadata identity 进行循环检测（比 canonicalize 路径比较更可靠高效）
-            // Unix: (dev, ino) 对标识唯一文件系统对象
-            // Windows: (volume_serial_number, file_index) 对标识唯一文件系统对象
+            // Detect loops using metadata identities (more reliable and efficient than comparing canonicalized paths).
+            // Unix: the (dev, ino) pair uniquely identifies a filesystem object.
+            // Windows: the (volume_serial_number, file_index) pair uniquely identifies a filesystem object.
             if let Ok(target_meta) = fs::metadata(&canonical_target) {
                 let target_ext = get_metadata_ext(&target_meta);
 
-                // 预存的 ancestor identity 直接内存比较，无需 O(depth) 次 stat。
+                // Compare precomputed ancestor identities in memory, avoiding O(depth) stat calls.
                 if let Some(ancestors) = &self.follow_link_ancestors {
                     for ancestor in ancestors.iter().rev() {
                         if Self::ancestor_identity_eq(&target_ext, ancestor) {
@@ -330,11 +330,11 @@ entry: &fs::DirEntry,
         Ok(dir_entry)
     }
 
-    /// 比较 target MetaDataExt 与预存的 ancestor identity 是否为同一文件系统对象。
+    /// Compare target MetaDataExt with a precomputed ancestor identity to determine whether they refer to the same filesystem object.
     ///
-    /// Unix: 比较 (dev, ino)
-    /// Windows: 比较 (volume_serial_number, file_index)
-    /// 如果 ancestor identity 字段不完整则返回 false（保守策略：宁可漏检也不误报）。
+    /// Unix: compare (dev, ino).
+    /// Windows: compare (volume_serial_number, file_index).
+    /// Return false if the ancestor identity is incomplete (conservative policy: prefer a missed detection over a false positive).
     fn ancestor_identity_eq(target: &MetaDataExt, ancestor: &AncestorIdentity) -> bool {
         #[cfg(unix)]
         {

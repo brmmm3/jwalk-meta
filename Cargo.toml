@@ -14,10 +14,10 @@ edition = "2021"
 
 [features]
 default = []
-# 启用则强制 Unix 走 std::fs::read_dir fallback（benchmark 对比用）
-# 不启用时 Linux 走 getdents64 直调路径
+# When enabled, force Unix to use the std::fs::read_dir fallback for benchmark comparisons.
+# When disabled, Linux uses the direct getdents64 path.
 legacy-read-dir = []
-windows-only = []  # Windows-only examples (class77_poc, test_ft)，需要时 --features windows-only
+windows-only = []  # Windows-only examples (class77_poc, test_ft); enable with --features windows-only.
 
 [[example]]
 name = "class77_poc"
@@ -41,12 +41,12 @@ winapi = { version = "0.3.9", features = ["std", "winioctl", "ioapiset", "fileap
 [target.'cfg(unix)'.dependencies]
 libc =  "0.2"
 
-# Linux io_uring 批量 STATX（仅 Linux）。
-# 内核要求：5.6+ (statx opcode), 5.18+ (setup_submit_all)
-# 注意：feature=legacy-read-dir 启用时此依赖仍会拉入但不被使用
-#（Cargo 不支持 target.cfg.dependencies 中的 feature= 判断）。
-# 架构白名单与 io-uring crate 上游一致（src/sys/mod.rs:18-33）：
-# io-uring 0.7.x 预编译 sys.rs 仅支持这 5 个架构，超出范围会触发 compile_error。
+# Linux io_uring batched STATX support (Linux only).
+# Kernel requirements: 5.6+ (statx opcode), 5.18+ (setup_submit_all).
+# This dependency is still included, but unused, when the legacy-read-dir feature is enabled
+# (Cargo cannot condition dependencies on features in target.cfg.dependencies).
+# The architecture allowlist matches the upstream io-uring crate (src/sys/mod.rs:18-33):
+# io-uring 0.7.x prebuilt sys.rs supports only these five architectures; others trigger compile_error.
 [target.'cfg(all(target_os = "linux", target_env = "gnu", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64", target_arch = "loongarch64", target_arch = "powerpc64")))'.dependencies]
 io-uring = "0.7"
 

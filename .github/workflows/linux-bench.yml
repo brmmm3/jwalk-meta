@@ -1,11 +1,11 @@
 name: Linux Benchmark
 
-# 用途：对比 jwalk-meta Linux 两条目录枚举路径的性能
-#   - default (无 feature)：getdents64 直调 + fstatat + 流式子目录分发
+# Purpose: compare the performance of jwalk-meta's two Linux directory-enumeration paths.
+#   - default (no features): direct getdents64 + fstatat + streaming subdirectory dispatch
 #   - legacy-read-dir feature：std::fs::read_dir fallback（baseline）
 #
-# 触发：手动 / push 到 master / PR 到 master
-# 输出：每个 feature 跑 scan_unix 示例，artifact 上传对比
+# Triggers: manual dispatch / push to master / pull request to master.
+# Output: run the scan_unix example for each feature and upload artifacts for comparison.
 
 on:
   push:
@@ -56,12 +56,12 @@ jobs:
           mkdir -p bench_dir/flat
           mkdir -p bench_dir/nested/level0/{a,b,c,d,e,f,g,h,i,j}
 
-          # 扁平目录：10K 文件
+          # Flat directory: 10K files.
           for i in $(seq 1 10000); do
             touch bench_dir/flat/f_${i}.txt
           done
 
-          # 嵌套目录：10 个 level0 子目录，每个 100 文件 + 10 个子目录各 10 文件
+          # Nested directories: 10 level0 directories, each with 100 files and 10 subdirectories with 10 files each.
           for d in bench_dir/nested/level0/*; do
             for i in $(seq 1 100); do
               touch "$d/f_${i}.txt"
@@ -72,7 +72,7 @@ jobs:
             done
           done
 
-          # 输出测试目录概览
+          # Show a summary of the test directory.
           echo "=== Test directory layout ==="
           find bench_dir -maxdepth 2 -type d | head -20
           echo "..."
@@ -135,7 +135,7 @@ jobs:
           retention-days: 30
 
   # ── SMB loopback benchmark ──────────────────────────────────────────
-  # 在 CI 里起 smbd + cifs mount，验证 io_uring 批量 STATX 在网络挂载点的效果
+  # Start smbd and mount CIFS in CI to verify batched io_uring STATX on a network mount.
   smb-benchmark:
     name: SMB Bench (io_uring vs fstatat)
     runs-on: ubuntu-latest
@@ -159,21 +159,21 @@ jobs:
         run: |
           set -euo pipefail
 
-          # 安装 samba + cifs-utils
+          # Install Samba and cifs-utils.
           sudo apt-get update -qq
           sudo apt-get install -y -qq samba cifs-utils
 
-          # 创建共享目录 + 测试目录树
+          # Create the share and test directory tree.
           sudo mkdir -p /srv/smbshare
           sudo mkdir -p /srv/smbshare/flat
           sudo bash -c 'mkdir -p /srv/smbshare/nested/level0/{a,b,c,d,e}'
 
-          # 扁平目录：2K 文件（SMB 较慢，不需要 10K）
+          # Flat directory: 2K files (SMB is slower, so 10K is unnecessary).
           for i in $(seq 1 2000); do
             sudo touch /srv/smbshare/flat/f_${i}.txt
           done
 
-          # 嵌套目录：5 个子目录各 50 文件
+          # Nested directories: five subdirectories with 50 files each.
           for d in /srv/smbshare/nested/level0/*; do
             for i in $(seq 1 50); do
               sudo touch "$d/f_${i}.txt"
@@ -184,9 +184,9 @@ jobs:
           find /srv/smbshare -maxdepth 2 -type d | head -20
           echo "Total entries: $(find /srv/smbshare | wc -l)"
 
-          # 确保 guest (nobody) 可读
+          # Ensure guest (nobody) can read the share.
           sudo chmod -R 755 /srv/smbshare
-          # 配置 smbd（不用 heredoc，避免 YAML 缩进问题）
+          # Configure smbd (avoid a heredoc to prevent YAML indentation issues).
           sudo bash -c 'cat > /etc/samba/smb.conf <<INNER_EOF
           [global]
              workgroup = WORKGROUP
@@ -205,27 +205,27 @@ jobs:
              directory mask = 0755
           INNER_EOF'
 
-          # 启动 smbd
+          # Start smbd.
           sudo smbd
           sleep 2
 
-          # 验证 smbd 在跑
+          # Verify that smbd is running.
           pgrep smbd || { echo 'ERROR: smbd not running'; exit 1; }
 
-          # cifs 挂载（guest 模式，vers=3.0）
+          # Mount CIFS in guest mode (vers=3.0).
           sudo mkdir -p /mnt/smb_test
           sudo mount -t cifs //localhost/share /mnt/smb_test -o guest,vers=3.0,cache=none
 
-          # 验证挂载
+          # Verify the mount.
           mount | grep cifs
           ls /mnt/smb_test/ | head -5
 
       - name: Verify fs_detect picks up SMB
         run: |
           echo "=== statfs on SMB mount ==="
-          # df -T 应显示 cifs
+          # df -T should report cifs.
           df -T /mnt/smb_test
-          # stat 应该能工作
+          # stat should work.
           stat /mnt/smb_test/flat/f_1.txt || echo 'stat failed (may be expected with guest)'
 
       - name: SMB Benchmark (io_uring path - default features)

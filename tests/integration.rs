@@ -1334,7 +1334,7 @@ fn channel_backpressure_slow_consumer() {
 }
 
 #[test]
-#[ignore] // 压力测试：手动运行 cargo test -- --ignored
+#[ignore] // Stress test: run manually with cargo test -- --ignored.
 fn large_directory_100k_files() {
     let dir = Dir::tmp();
     // Create 1000 dirs × 100 files = 100K files
@@ -1352,7 +1352,7 @@ fn large_directory_100k_files() {
     let start = std::time::Instant::now();
     let wd = WalkDir::new(dir.path())
         .parallelism(Parallelism::RayonNewPool(4))
-        .sort(false); // 不排序，提高吞吐
+        .sort(false); // Disable sorting to improve throughput.
     let r = dir.run_recursive(wd);
 
     let elapsed = start.elapsed();
@@ -1663,7 +1663,7 @@ fn permission_denied_graceful() {
 #[test]
 #[ignore = "environment-sensitive: requires non-root + strict fs permissions, fails on CI runners"]
 fn permission_denied_mixed_scenario() {
-    // 测试标记为 #[ignore]，CI 不跳过，用户本地手动跑：cargo test -- --ignored
+    // This test is marked #[ignore]; CI skips it, but users can run it locally with cargo test -- --ignored.
     let dir = Dir::tmp();
     dir.mkdirp("readable_a");
     dir.mkdirp("readable_a/sub");
@@ -1812,7 +1812,7 @@ fn symlink_cycle_detection_with_follow() {
 
     let wd = WalkDir::new(dir.path()).follow_links(true).sort(true);
     let r = dir.run_recursive(wd);
-    // follow_links + 循环 symlink 应被检测到，产生 Loop 错误（而非无限循环）
+    // With follow_links, a symlink loop should be detected and produce a Loop error (not loop forever).
     let has_loop_error = r
         .errs()
         .iter()

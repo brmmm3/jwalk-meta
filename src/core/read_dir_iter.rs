@@ -6,22 +6,22 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 
 /// Client's read dir function.
 ///
-/// 第二个参数 `Option<StreamingContext<C>>` 在并行模式下提供流式分发上下文，
-/// 允许在枚举期间立即调度子目录（而非等待完整枚举结束后再调度）。
-/// 单线程 Walk 模式传 `None`。
+/// The second argument, `Option<StreamingContext<C>>`, provides streaming-dispatch context in parallel mode,
+/// allowing subdirectories to be scheduled immediately during enumeration instead of waiting for enumeration to finish.
+/// Pass `None` in single-threaded Walk mode.
 pub(crate) type ReadDirCallback<C> =
     dyn Fn(ReadDirSpec<C>, Option<StreamingContext<C>>) -> Result<ReadDir<C>> + Send + Sync + 'static;
 
-/// 流式分发上下文，用于在 NT 枚举期间立即调度子目录。
+/// Streaming-dispatch context for immediately scheduling subdirectories during NT enumeration.
 ///
-/// 在 `multi_threaded_walk_dir` 中创建，传递给 callback。
-/// callback 内部对每个子目录调用 `schedule()` 实现即时调度。
+/// Created in `multi_threaded_walk_dir` and passed to the callback.
+/// The callback calls `schedule()` for each subdirectory to schedule it immediately.
 pub(crate) struct StreamingContext<C: ClientState> {
     pub index_path: IndexPath,
     run_context: RunContext<C>,
-    /// 父目录的调度权重，用于优先淹没算法的权重继承。
-    /// 子目录权重 = parent_weight + 已发现子目录数，
-    /// 确保大管道（多子目录）的分支也获得高优先级。
+    /// Parent directory's scheduling weight, used for weight inheritance in the priority-flooding algorithm.
+    /// Subdirectory weight = parent_weight + number of discovered subdirectories,
+    /// ensuring that branches of large pipelines (many subdirectories) also get high priority.
     pub parent_weight: usize,
 }
 
@@ -34,13 +34,13 @@ impl<C: ClientState> StreamingContext<C> {
         }
     }
 
-    /// 调度一个子目录的读取任务到优先队列。
-    /// 返回 true 表示成功入队，false 表示队列已关闭（遍历已停止）。
+    /// Schedule a subdirectory read task in the priority queue.
+    /// Return true if enqueued successfully, or false if the queue is closed (traversal has stopped).
     pub(crate) fn schedule(&self, weighted: Weighted<ReadDirSpec<C>>) -> bool {
         self.run_context.schedule_read_dir_spec(weighted)
     }
 
-    /// 检查遍历是否已被停止（close() 调用）。
+    /// Check whether traversal has been stopped (close() was called).
     pub(crate) fn is_stopped(&self) -> bool {
         self.run_context.stop.load(AtomicOrdering::Acquire)
     }
@@ -85,11 +85,11 @@ impl<C: ClientState> ReadDirIter<C> {
             let (read_dir_spec_queue, read_dir_spec_iter) =
                 new_priority_queue(stop.clone(), channel_capacity);
 
-            // 根目录使用高位权重，确保最先被调度（优先淹没算法）
-            // 使用 (usize::MAX >> 1) 避免 parent_weight + child_count 溢出
+            // Give the root a high weight so it is scheduled first (priority-flooding algorithm).
+            // Use (usize::MAX >> 1) to avoid overflow in parent_weight + child_count.
             const ROOT_WEIGHT: usize = usize::MAX >> 1;
             for read_dir_spec in read_dir_specs.into_iter() {
-                // 初始化阶段 channel 不可能满（刚创建），但用 expect 明确语义
+                // The channel cannot be full during initialization (it was just created), but use expect to make the invariant explicit.
                 read_dir_spec_queue
                     .push(Weighted::new(read_dir_spec, IndexPath::new(smallvec![0]), ROOT_WEIGHT))
                     .expect("init: priority queue push should not fail");
@@ -123,8 +123,8 @@ impl<C: ClientState> ReadDirIter<C> {
                 );
             });
             if startup_rx.is_some_and(|(rx, duration)| rx.recv_timeout(duration).is_err()) {
-                // busy timeout 触发：通知已 spawn 的线程停止，
-                // 避免孤立线程继续遍历整个目录树
+                // Busy timeout triggered: notify already-spawned threads to stop,
+                // preventing orphaned threads from continuing to traverse the entire directory tree.
                 stop.store(true, AtomicOrdering::Release);
                 return None;
             }
@@ -147,7 +147,7 @@ impl<C: ClientState> Iterator for ReadDirIter<C> {
                 core_read_dir_callback,
             } => {
                 let read_dir_spec = read_dir_spec_stack.pop()?;
-                // Walk 模式不使用流式分发
+                // Walk mode does not use streaming dispatch.
                 let read_dir_result = core_read_dir_callback(read_dir_spec, None);
 
                 if let Ok(read_dir) = read_dir_result.as_ref() {

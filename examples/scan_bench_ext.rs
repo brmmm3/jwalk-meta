@@ -1,10 +1,10 @@
-//! Ext+hardlink 模式 D 盘扫描基准测试
+//! Benchmark scanning the D: drive in Ext+hardlink mode.
 //!
-//! 用法: cargo run --example scan_bench_ext -- D:\
+//! Usage: cargo run --example scan_bench_ext -- D:\
 //!
-//! 对比三种模式:
-//!   1. Base (仅目录枚举，无 metadata)
-//!   2. Ext (metadata_ext=true, 无 hardlink)
+//! Compare three modes:
+//!   1. Base (directory enumeration only, no metadata)
+//!   2. Ext (metadata_ext=true, no hardlink information)
 //!   3. Ext+Hardlink (metadata_ext=true + hardlink_info=true)
 
 use std::time::Instant;
@@ -19,8 +19,8 @@ fn main() {
     println!("Path: {}", path);
     println!();
 
-    // ── Run 1: Base (仅目录枚举) ──────────────────────────────────
-    println!("[1/3] Base mode (目录枚举，无 metadata)...");
+    // ── Run 1: Base (directory enumeration only) ──────────────────
+    println!("[1/3] Base mode (directory enumeration, no metadata)...");
     let _ = std::io::stdout().flush();
     let (base_entries, base_errors, base_time) = scan_base(&path);
     println!(
@@ -28,8 +28,8 @@ fn main() {
         base_entries, base_errors, base_time
     );
 
-    // ── Run 2: Ext (metadata_ext=true, 无 hardlink) ───────────────
-    println!("[2/3] Ext mode (metadata_ext，无 hardlink)...");
+    // ── Run 2: Ext (metadata_ext=true, no hardlink information) ───
+    println!("[2/3] Ext mode (metadata_ext, no hardlink information)...");
     let _ = std::io::stdout().flush();
     let (ext_entries, ext_errors, ext_time) = scan_ext(&path);
     println!(
@@ -42,13 +42,13 @@ fn main() {
     let _ = std::io::stdout().flush();
     let (hl_entries, hl_errors, hl_time, hl_with_nlink) = scan_ext_hardlink(&path);
     println!(
-        "  -> {} entries, {} errors, {:.3}s (有 nlink: {})",
+        "  -> {} entries, {} errors, {:.3}s (entries with nlink: {})",
         hl_entries, hl_errors, hl_time, hl_with_nlink
     );
 
-    // ── 第二轮 (warm cache) ───────────────────────────────────────
+    // ── Second run (warm cache) ──────────────────────────────────
     println!();
-    println!("=== 第二轮 (warm cache) ===");
+    println!("=== Second run (warm cache) ===");
     let (_, _, base_time2) = scan_base(&path);
     let (_, _, ext_time2) = scan_ext(&path);
     let (_, _, hl_time2, _) = scan_ext_hardlink(&path);
@@ -56,10 +56,10 @@ fn main() {
     println!("  Ext:           {:.3}s", ext_time2);
     println!("  Ext+Hardlink:  {:.3}s", hl_time2);
 
-    // ── 汇总 ──────────────────────────────────────────────────────
+    // ── Summary ──────────────────────────────────────────────────
     println!();
-    println!("=== 汇总 ===");
-    println!("模式              | Cold (s) | Warm (s) | Entries | Ext开销 | HL开销");
+    println!("=== Summary ===");
+    println!("Mode              | Cold (s) | Warm (s) | Entries | Ext overhead | HL overhead");
     println!("------------------|----------|----------|---------|---------|-------");
     println!(
         "Base              | {:>8.3} | {:>8.3} | {:>7} |    -    |   -",

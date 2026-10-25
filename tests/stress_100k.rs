@@ -9,7 +9,7 @@ fn stress_1000_files_serial() {
     let dir = Dir::tmp();
     let count = 1000;
 
-    // 创建扁平目录结构
+    // Create a flat directory structure.
     dir.mkdirp("files");
     for i in 0..count {
         dir.touch(format!("files/file_{:04}.txt", i));
@@ -72,7 +72,7 @@ fn stress_1000_files_nested() {
     let dirs_per_level = 10;
     let depth = 3;
 
-    // 创建 10 x 10 x 10 = 1000 个目录，每个含 1 个文件
+    // Create 10 x 10 x 10 = 1,000 directories, each containing one file.
     fn create_nested(
         dir: &Dir,
         prefix: &str,
@@ -141,7 +141,7 @@ fn stress_serial_parallel_same_count() {
     par_r.assert_no_errors();
 }
 
-/// 压力测试：手动运行 `cargo test -- --ignored`
+/// Stress test: run manually with `cargo test -- --ignored`.
 #[test]
 #[ignore]
 fn stress_100k_files() {

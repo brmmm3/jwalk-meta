@@ -70,7 +70,7 @@ pub struct MetaData {
 }
 
 impl MetaData {
-    /// 从 std::fs::Metadata 构造完整的 MetaData。
+    /// Construct complete MetaData from std::fs::Metadata.
     #[inline]
     pub fn from_fs_metadata(metadata: &fs::Metadata) -> Self {
         MetaData {
@@ -124,27 +124,27 @@ fn created_time_from_metadata(metadata: &fs::Metadata) -> Option<SystemTime> {
     metadata.created().ok()
 }
 
-/// 预计算的祖先 metadata identity，用于符号链接循环检测。
+/// Precomputed ancestor metadata identity used for symlink loop detection.
 ///
-/// 在添加 ancestor 时一次性计算并存储，避免 follow_symlink 中
-/// 每次循环检测都需要 O(depth) 次 fs::metadata 系统调用。
-/// 循环检测降为 O(depth) 内存比较。
+/// Compute and store this once when adding an ancestor, avoiding O(depth) fs::metadata
+/// system calls for every loop check in follow_symlink.
+/// Loop detection is reduced to O(depth) in-memory comparisons.
 #[cfg(unix)]
 #[derive(Debug, Clone)]
 pub struct AncestorIdentity {
-    /// 祖先路径（用于错误消息）
+    /// Ancestor path (used in error messages).
     pub path: Arc<Path>,
-    /// 设备 ID (st_dev)
+    /// Device ID (st_dev).
     pub dev: u64,
-    /// inode 号 (st_ino)
+    /// Inode number (st_ino).
     pub ino: u64,
 }
 
 #[cfg(unix)]
 impl AncestorIdentity {
-    /// 从路径的 symlink_metadata 计算身份标识。
+    /// Compute the identity from a path's symlink_metadata.
     ///
-    /// 如果获取 metadata 失败，返回 None（保守策略：跳过此 ancestor 的循环检测）。
+    /// Return None if metadata retrieval fails (conservative policy: skip loop detection for this ancestor).
     pub fn from_path(path: Arc<Path>) -> Option<Self> {
         let meta = fs::symlink_metadata(path.as_ref()).ok()?;
         Some(AncestorIdentity {
@@ -158,19 +158,19 @@ impl AncestorIdentity {
 #[cfg(windows)]
 #[derive(Debug, Clone)]
 pub struct AncestorIdentity {
-    /// 祖先路径（用于错误消息）
+    /// Ancestor path (used in error messages).
     pub path: Arc<Path>,
-    /// 卷序列号
+    /// Volume serial number.
     pub volume_serial_number: Option<u32>,
-    /// 文件索引
+    /// File index.
     pub file_index: Option<u64>,
 }
 
 #[cfg(windows)]
 impl AncestorIdentity {
-    /// 从路径的 symlink_metadata 计算身份标识。
+    /// Compute the identity from a path's symlink_metadata.
     ///
-    /// 如果获取 metadata 失败，返回 None（保守策略：跳过此 ancestor 的循环检测）。
+    /// Return None if metadata retrieval fails (conservative policy: skip loop detection for this ancestor).
     pub fn from_path(path: Arc<Path>) -> Option<Self> {
         let meta = fs::symlink_metadata(path.as_ref()).ok()?;
         let ext = get_metadata_ext(&meta);

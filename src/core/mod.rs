@@ -31,7 +31,7 @@ pub(crate) mod fs_detect;
         target_arch = "powerpc64",
     ),
 ))]
-// io-uring 0.7.x 预编译 sys.rs 白名单（上游 src/sys/mod.rs:18-33），超出范围触发 compile_error。
+// io-uring 0.7.x prebuilt sys.rs architecture allowlist (upstream src/sys/mod.rs:18-33); other targets trigger compile_error.
 pub(crate) mod linux_io_uring;
 
 use rayon::prelude::*;

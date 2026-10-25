@@ -1,8 +1,9 @@
-//! Unix 目录扫描示例。
+//! Example of scanning a directory on Unix.
 //!
-//! 在 Linux 上自动启用 getdents64 直调 + 流式子目录分发；macOS 走 fs::read_dir fallback。
+//! Linux automatically uses direct getdents64 calls and streaming subdirectory dispatch;
+//! macOS uses the fs::read_dir fallback.
 //!
-//! 用法：
+//! Usage:
 //! ```sh
 //! cargo run --release --example scan_unix -- <path>
 //! ```

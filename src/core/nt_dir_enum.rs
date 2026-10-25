@@ -1,7 +1,7 @@
-//! Windows NT Native API 批量目录枚举。
+//! Batched directory enumeration using the Windows NT Native API.
 //!
-//! 使用 NtQueryDirectoryFileEx + 64KB 缓冲区替代 FindFirstFileW/FindNextFileW，
-//! 实现单次系统调用批量获取目录条目，显著减少用户态-内核态切换次数。
+//! Use NtQueryDirectoryFileEx with a 64 KB buffer instead of FindFirstFileW/FindNextFileW,
+//! fetching directory entries in batches with one syscall and significantly reducing user/kernel transitions.
 
 #![cfg(windows)]
 
@@ -22,29 +22,29 @@ use winapi::um::winnt::{
 };
 use winapi::um::fileapi::GetVolumeInformationByHandleW;
 
-/// NtQueryDirectoryFileEx 的 64KB I/O 缓冲区，减少系统调用次数。
-/// 本地磁盘 64KB 已足够（单次系统调用微秒级延迟）。
-/// SMB/网络路径可考虑更大值以减少网络往返，但需权衡 TLS 内存占用。
+/// 64 KB I/O buffer for NtQueryDirectoryFileEx to reduce syscall count.
+/// 64 KB is sufficient for local disks (microsecond-scale latency per syscall).
+/// A larger buffer may reduce network round trips for SMB/network paths, but increases TLS memory use.
 const BUFFER_SIZE: usize = 64 * 1024;
 
-// 线程本地缓冲区，在 rayon worker 线程间复用 64KB 堆分配。
+// Thread-local buffer that reuses a 64 KB heap allocation across Rayon worker threads.
 thread_local! {
-    static TLS_BUFFER: std::cell::RefCell<Option<Vec<u8>>> = std::cell::RefCell::new(None);
+    static TLS_BUFFER: std::cell::RefCell<Option<Vec<u8>>> = const { std::cell::RefCell::new(None) };
 }
 
-/// FILE_ID_BOTH_DIR_INFO 的文件信息类编号。
+/// File information class number for FILE_ID_BOTH_DIR_INFO.
 const FILE_ID_BOTH_DIR_INFO_CLASS: u32 = 37;
 
-/// NtQueryDirectoryFileEx 返回 "没有更多文件" 的状态码。
+/// Status code returned by NtQueryDirectoryFileEx when there are no more files.
 const STATUS_NO_MORE_FILES: i32 = -2147483642; // 0x80000006
 
 /// FILE_ATTRIBUTE_DIRECTORY flag value.
 const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
-// ── FFI 结构体 ──────────────────────────────────────────────────────────
+// ── FFI structures ──────────────────────────────────────────────────────
 
-/// NtQueryDirectoryFileEx 返回的目录条目信息结构。
-/// 对应 Windows FILE_ID_BOTH_DIR_INFO。
+/// Directory entry information structure returned by NtQueryDirectoryFileEx.
+/// Corresponds to the Windows FILE_ID_BOTH_DIR_INFO structure.
 #[repr(C)]
 #[allow(non_snake_case)]
 struct FILE_ID_BOTH_DIR_INFO {
@@ -65,7 +65,7 @@ struct FILE_ID_BOTH_DIR_INFO {
     FileName: [u16; 1],
 }
 
-/// NT I/O 状态块，NtQueryDirectoryFileEx 的输出参数。
+/// NT I/O status block, an output parameter for NtQueryDirectoryFileEx.
 #[repr(C)]
 #[allow(non_snake_case)]
 struct IO_STATUS_BLOCK {
@@ -73,8 +73,8 @@ struct IO_STATUS_BLOCK {
     Information: usize,
 }
 
-/// NT UNICODE_STRING，用于 OBJECT_ATTRIBUTES 中的文件名。
-/// 注意：Length 和 MaximumLength 以字节为单位（不含 null terminator）。
+/// NT UNICODE_STRING for the filename in OBJECT_ATTRIBUTES.
+/// Note: Length and MaximumLength are in bytes and exclude the null terminator.
 #[repr(C)]
 #[allow(non_snake_case)]
 struct UNICODE_STRING {
@@ -83,8 +83,8 @@ struct UNICODE_STRING {
     Buffer: *mut u16,
 }
 
-/// NT OBJECT_ATTRIBUTES，用于 NtQueryInformationByName。
-/// RootDirectory 为已打开的目录句柄，ObjectName 为相对文件名。
+/// NT OBJECT_ATTRIBUTES for NtQueryInformationByName.
+/// RootDirectory is an open directory handle; ObjectName is a relative filename.
 #[repr(C)]
 #[allow(non_snake_case)]
 struct OBJECT_ATTRIBUTES {
@@ -96,9 +96,9 @@ struct OBJECT_ATTRIBUTES {
     SecurityQualityOfService: *mut std::ffi::c_void,
 }
 
-/// NtQueryInformationByName 返回的文件统计信息 (class 68)。
-/// Win10 1709+ 可用。包含 FileId + NumberOfLinks + 时间戳 + 文件属性，
-/// 无需打开文件句柄即可查询。
+/// File statistics returned by NtQueryInformationByName (class 68).
+/// Available on Windows 10 1709+. Includes FileId, NumberOfLinks, timestamps, and file attributes,
+/// and can be queried without opening a file handle.
 #[repr(C)]
 #[allow(non_snake_case)]
 struct FILE_STAT_INFORMATION {
@@ -115,16 +115,16 @@ struct FILE_STAT_INFORMATION {
     EffectiveAccess: u32,
 }
 
-/// FILE_STAT_INFORMATION 的信息类编号 (class 68)。
-/// Win10 1709+ 可用。
+/// Information class number for FILE_STAT_INFORMATION (class 68).
+/// Available on Windows 10 1709+.
 const FILE_STAT_INFORMATION_CLASS: u32 = 68;
 
-/// OBJECT_ATTRIBUTES 的 OBJ_CASE_INSENSITIVE 标志。
+/// OBJ_CASE_INSENSITIVE flag for OBJECT_ATTRIBUTES.
 const OBJ_CASE_INSENSITIVE: u32 = 0x40;
 
-// ── 动态加载 ntdll ─────────────────────────────────────────────────────
+// ── Dynamically load ntdll ──────────────────────────────────────────────
 
-/// NtQueryDirectoryFileEx 函数签名。
+/// Function signature for NtQueryDirectoryFileEx.
 #[allow(non_snake_case)]
 type NtQueryDirectoryFileExFn = unsafe extern "system" fn(
     FileHandle: HANDLE,
@@ -140,11 +140,11 @@ type NtQueryDirectoryFileExFn = unsafe extern "system" fn(
     RestartScan: i32,
 ) -> i32;
 
-/// RtlNtStatusToDosError 函数签名，用于将 NTSTATUS 转换为 Win32 错误码。
+/// Function signature for RtlNtStatusToDosError, which converts NTSTATUS to a Win32 error code.
 type RtlNtStatusToDosErrorFn = unsafe extern "system" fn(status: i32) -> u32;
 
-/// NtQueryInformationByName 函数签名 (Win10 1709+)。
-/// 使用 RootDirectory + FileName 查询文件信息，无需打开文件句柄。
+/// Function signature for NtQueryInformationByName (Windows 10 1709+).
+/// Queries file information using RootDirectory and FileName without opening a file handle.
 #[allow(non_snake_case)]
 type NtQueryInformationByNameFn = unsafe extern "system" fn(
     ObjectAttributes: *mut OBJECT_ATTRIBUTES,
@@ -154,46 +154,46 @@ type NtQueryInformationByNameFn = unsafe extern "system" fn(
     FileInformationClass: u32,
 ) -> i32;
 
-/// 从 ntdll.dll 动态加载的函数指针集合。
+/// Collection of function pointers dynamically loaded from ntdll.dll.
 struct NtDllFuncs {
     query_dir: NtQueryDirectoryFileExFn,
     status_to_win32: RtlNtStatusToDosErrorFn,
-    /// NtQueryInformationByName (Win10 1709+)。Option 因为老版本 Windows 不存在。
+    /// NtQueryInformationByName (Windows 10 1709+). Optional because it is absent on older Windows versions.
     query_by_name: Option<NtQueryInformationByNameFn>,
 }
 
-/// 懒加载 ntdll 函数指针。失败时 panic（首次调用时初始化，通常在用户首次调用 into_iter() 时触发）。
+/// Lazily load ntdll function pointers. Panics on failure (initialized on first call, usually when the user first calls into_iter()).
 ///
-/// 设计决策：panic 是有意的 fail-fast——ntdll.dll 是 Windows 进程级核心 DLL，
-/// 加载失败意味着系统安装损坏或安全软件干预，进程无法继续正常运行。
-/// 改用 Result 传播只会把不可避免的崩溃推迟到调用方，无实际收益。
+/// Design decision: panicking is intentional fail-fast behavior. ntdll.dll is a core, process-wide Windows DLL;
+/// failure to load it indicates a damaged system installation or security software interference, and the process cannot operate normally.
+/// Propagating a Result would only defer the inevitable failure to the caller without any benefit.
 ///
-/// LoadLibraryW 增加了 ntdll.dll 的引用计数但未调用 FreeLibrary。
-/// 这是有意为之——ntdll.dll 永远不会被卸载，函数指针需要在整个进程生命周期内保持有效。
+/// LoadLibraryW increments ntdll.dll's reference count; FreeLibrary is intentionally not called.
+/// ntdll.dll is never unloaded, and the function pointers must remain valid for the process lifetime.
 fn ntdll_funcs() -> &'static NtDllFuncs {
     use std::sync::OnceLock;
     static FUNCS: OnceLock<NtDllFuncs> = OnceLock::new();
     FUNCS.get_or_init(|| unsafe {
         // SAFETY:
-        // 1. LoadLibraryW("ntdll.dll") 安全——ntdll.dll 是 Windows 系统核心 DLL，始终存在
-        // 2. GetProcAddress 获取的函数指针签名由上面的 type alias 保证与 NT API 文档一致
-        // 3. transmute 将 raw 指针转为类型化函数指针，类型由 NtQueryDirectoryFileExFn
-        //    和 RtlNtStatusToDosErrorFn 的签名定义保证正确
+        // 1. LoadLibraryW("ntdll.dll") is safe: ntdll.dll is a core Windows system DLL and is always present.
+        // 2. The type aliases above ensure that GetProcAddress function pointer signatures match the NT API documentation.
+        // 3. transmute converts raw pointers to typed function pointers; their types are guaranteed by the signatures
+        //    of NtQueryDirectoryFileExFn and RtlNtStatusToDosErrorFn.
         let ntdll_name = to_wide_null("ntdll.dll\0");
         let module = LoadLibraryW(ntdll_name.as_ptr());
         if module.is_null() {
-            panic!("nt_dir_enum: 无法加载 ntdll.dll");
+            panic!("nt_dir_enum: failed to load ntdll.dll");
         }
 
-        let query_dir_ptr = GetProcAddress(module, b"NtQueryDirectoryFileEx\0".as_ptr() as *const i8);
-        let status_to_win32_ptr = GetProcAddress(module, b"RtlNtStatusToDosError\0".as_ptr() as *const i8);
+        let query_dir_ptr = GetProcAddress(module, c"NtQueryDirectoryFileEx".as_ptr());
+        let status_to_win32_ptr = GetProcAddress(module, c"RtlNtStatusToDosError".as_ptr());
 
         if query_dir_ptr.is_null() || status_to_win32_ptr.is_null() {
-            panic!("nt_dir_enum: 无法获取 ntdll 函数地址");
+            panic!("nt_dir_enum: failed to get ntdll function addresses");
         }
 
-        // NtQueryInformationByName (Win10 1709+)：可选加载，老版本 Windows 不存在
-        let query_by_name_ptr = GetProcAddress(module, b"NtQueryInformationByName\0".as_ptr() as *const i8);
+        // NtQueryInformationByName (Windows 10 1709+): load optionally; it is absent on older Windows versions.
+        let query_by_name_ptr = GetProcAddress(module, c"NtQueryInformationByName".as_ptr());
         let query_by_name = if query_by_name_ptr.is_null() {
             None
         } else {
@@ -208,13 +208,13 @@ fn ntdll_funcs() -> &'static NtDllFuncs {
     })
 }
 
-// ── RAII 句柄守卫 ──────────────────────────────────────────────────────
+// ── RAII handle guard ──────────────────────────────────────────────────
 
-/// RAII 守卫，Drop 时自动 CloseHandle。用于 CreateFileW 返回的句柄。
+/// RAII guard that automatically calls CloseHandle on drop. Used for handles returned by CreateFileW.
 pub(crate) struct HandleGuard(HANDLE);
 
 impl HandleGuard {
-    /// 返回内部句柄，用于批量查询等操作。
+    /// Return the wrapped handle for batch queries and other operations.
     pub(crate) fn handle(&self) -> HANDLE {
         self.0
     }
@@ -222,17 +222,17 @@ impl HandleGuard {
 
 impl Drop for HandleGuard {
     fn drop(&mut self) {
-        // SAFETY: HandleGuard 仅包装 CreateFileW 返回的有效句柄，
-        // Drop 时调用 CloseHandle 是安全的。
+        // SAFETY: HandleGuard wraps only valid handles returned by CreateFileW,
+        // so calling CloseHandle on drop is safe.
         unsafe {
             CloseHandle(self.0);
         }
     }
 }
 
-// ── 公共结构体 ─────────────────────────────────────────────────────────
+// ── Public structures ──────────────────────────────────────────────────
 
-/// NtQueryDirectoryFileEx 返回的目录条目信息。
+/// Directory entry information returned by NtQueryDirectoryFileEx.
 #[derive(Debug)]
 pub struct DirEntryInfo {
     pub file_name: OsString,
@@ -242,41 +242,41 @@ pub struct DirEntryInfo {
     pub last_write_time: i64,
     pub last_access_time: i64,
     pub file_id: u64,
-    /// 硬链接数。NT API 批量枚举不提供此字段，
-    /// 需通过 NtQueryInformationByName + FileStatInformation (class 68) 查询。
-    /// Win10 1709+ 可用；老版本 Windows 或查询失败时为 None。
+    /// Hard-link count. NT API batch enumeration does not provide this field;
+    /// query it with NtQueryInformationByName + FileStatInformation (class 68).
+    /// Available on Windows 10 1709+; None on older Windows versions or if the query fails.
     pub number_of_links: Option<u32>,
-    /// 卷序列号。通过 GetVolumeInformationByHandleW 从目录句柄获取一次。
-    /// 所有条目共享同一值（同一目录内的文件属于同一卷）。
+    /// Volume serial number. Retrieved once from the directory handle using GetVolumeInformationByHandleW.
+    /// Shared by all entries (files in a directory belong to the same volume).
     pub volume_serial_number: Option<u32>,
 }
 
-// ── 辅助函数 ───────────────────────────────────────────────────────────
+// ── Helper functions ──────────────────────────────────────────────────
 
-/// 将字节字符串转为 null-terminated UTF-16 Vec（用于 LoadLibraryW/GetProcAddress）。
+/// Convert a byte string to a null-terminated UTF-16 Vec (for LoadLibraryW/GetProcAddress).
 fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-/// 将 OS 路径转为 null-terminated UTF-16 Vec（用于 CreateFileW 等宽字符 API）。
+/// Convert an OS path to a null-terminated UTF-16 Vec (for wide-character APIs such as CreateFileW).
 fn path_to_widestring(path: &Path) -> Vec<u16> {
     let mut wide: Vec<u16> = path.as_os_str().encode_wide().collect();
     wide.push(0);
     wide
 }
 
-/// 将 NTSTATUS 转换为 io::Error。
+/// Convert NTSTATUS to io::Error.
 fn ntstatus_to_io_error(status: i32, funcs: &NtDllFuncs) -> io::Error {
-    // SAFETY: RtlNtStatusToDosError 是稳定的 Windows API，输入任意 i32 均安全。
+    // SAFETY: RtlNtStatusToDosError is a stable Windows API; any i32 input is safe.
     let win32_err = unsafe { (funcs.status_to_win32)(status) };
     io::Error::from_raw_os_error(win32_err as i32)
 }
 
-// ── 核心枚举函数 ───────────────────────────────────────────────────────
+// ── Core enumeration functions ────────────────────────────────────────
 
-/// 打开目录句柄，返回 RAII 守卫。
+/// Open a directory handle and return an RAII guard.
 ///
-/// SAFETY: CreateFileW 参数合法，FILE_FLAG_BACKUP_SEMANTICS 允许打开目录。
+/// SAFETY: CreateFileW arguments are valid; FILE_FLAG_BACKUP_SEMANTICS allows directories to be opened.
 fn open_dir_handle(path: &Path) -> io::Result<HandleGuard> {
     let wide_path = path_to_widestring(path);
     let handle = unsafe {
@@ -298,11 +298,11 @@ fn open_dir_handle(path: &Path) -> io::Result<HandleGuard> {
     Ok(HandleGuard(handle))
 }
 
-/// 解析单次 NtQueryDirectoryFileEx 返回的 buffer，提取目录条目。
+/// Parse the buffer returned by one NtQueryDirectoryFileEx call and extract directory entries.
 ///
-/// 对每个非 "."/".." 条目调用 `on_entry` 回调。
+/// Call the `on_entry` callback for each entry other than "." and "..".
 ///
-/// SAFETY: 调用者必须保证 buffer 包含有效的 NT API 返回数据。
+/// SAFETY: The caller must ensure that buffer contains valid data returned by the NT API.
 fn parse_buffer_entries(
     buffer: &[u8],
     mut on_entry: impl FnMut(&FILE_ID_BOTH_DIR_INFO, OsString),
@@ -310,13 +310,13 @@ fn parse_buffer_entries(
     let mut offset: usize = 0;
     let buf_len = buffer.len();
     loop {
-        // 边界检查：确保能读取完整的 entry 头部（含变长 FileName 的第一个元素）
-        // 内核返回的数据通常是可信的，此检查防御内存损坏或异常 NextEntryOffset
+        // Bounds check: ensure the complete entry header can be read (including the first element of the variable-length FileName).
+        // Kernel data is generally trusted; this check guards against memory corruption or an invalid NextEntryOffset.
         if offset + std::mem::size_of::<FILE_ID_BOTH_DIR_INFO>() > buf_len {
             break;
         }
 
-        // SAFETY: 边界检查已保证 offset..offset+size_of 在 buffer 内。
+        // SAFETY: The bounds check ensures offset..offset+size_of is within buffer.
         // FILE_ID_BOTH_DIR_INFO may appear at unaligned offsets (NT only guarantees
         // 4-byte alignment, but the struct has u64 fields requiring 8-byte alignment).
         let entry_ptr = unsafe { buffer.as_ptr().add(offset) };
@@ -325,14 +325,14 @@ fn parse_buffer_entries(
         let name_len = entry.FileNameLength as usize;
         let name_chars = name_len / 2;
 
-        // 边界检查：确保 FileName 变长数据完全在 buffer 内
+        // Bounds check: ensure all variable-length FileName data is within buffer.
         let name_start_offset = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
         if offset + name_start_offset + name_len > buf_len {
             break;
         }
 
-        // Raw UTF-16 比较 "." 和 ".."，避免 to_string_lossy 堆分配
-        // FileName 是 C 变长数组 ([u16; 1])，必须用指针访问避免编译器越界检查
+        // Compare "." and ".." as raw UTF-16 to avoid a to_string_lossy heap allocation.
+        // FileName is a C variable-length array ([u16; 1]); access it through a pointer to avoid compiler bounds checks.
         let first_char = entry.FileName[0];
         let is_dot = name_chars == 1 && first_char == b'.' as u16;
         let is_dotdot = name_chars == 2
@@ -341,7 +341,7 @@ fn parse_buffer_entries(
             && unsafe { *entry.FileName.as_ptr().add(1) } == b'.' as u16;
 
         if !is_dot && !is_dotdot {
-            // SAFETY: 边界检查已保证 FileName 的 name_len 字节在 buffer 内
+            // SAFETY: The bounds check ensures name_len bytes of FileName are within buffer.
             let name_slice = unsafe {
                 let name_start = entry_ptr.add(name_start_offset);
                 std::slice::from_raw_parts(name_start as *const u16, name_chars)
@@ -359,10 +359,10 @@ fn parse_buffer_entries(
     }
 }
 
-/// 核心枚举循环：NtQueryDirectoryFileEx 批量查询 + buffer 解析。
+/// Core enumeration loop: batch queries with NtQueryDirectoryFileEx and parse the returned buffer.
 ///
-/// `on_entry` 对每个非 "."/".." 条目调用，接收解析出的原始 entry 和文件名。
-/// 调用者负责构造 `DirEntryInfo` 并决定是否收集/分发。
+/// Call `on_entry` for each entry other than "."/"..", passing the parsed raw entry and filename.
+/// The caller constructs `DirEntryInfo` and decides whether to collect or dispatch it.
 fn enumerate_dir_core(
     guard: &HandleGuard,
     funcs: &NtDllFuncs,
@@ -395,8 +395,8 @@ fn enumerate_dir_core_inner(
             Information: 0,
         };
 
-        // SAFETY: handle 是有效的目录句柄，buffer 大小充足，
-        // FILE_ID_BOTH_DIR_INFO_CLASS 是合法的信息类。
+        // SAFETY: handle is a valid directory handle, buffer is large enough,
+        // and FILE_ID_BOTH_DIR_INFO_CLASS is a valid information class.
         let status = unsafe {
             (funcs.query_dir)(
                 guard.0,
@@ -422,7 +422,7 @@ fn enumerate_dir_core_inner(
             return Err(ntstatus_to_io_error(status, funcs));
         }
 
-        // 安全：iosb.Information 包含 buffer 中有效数据的字节数
+        // SAFETY: iosb.Information contains the number of valid data bytes in buffer.
         let bytes_returned = iosb.Information;
         if bytes_returned == 0 {
             break;
@@ -434,12 +434,12 @@ fn enumerate_dir_core_inner(
     Ok(())
 }
 
-/// 使用 NtQueryDirectoryFileEx 批量枚举目录中的所有文件和子目录。
+/// Use NtQueryDirectoryFileEx to batch-enumerate all files and subdirectories in a directory.
 ///
-/// 返回除 "." 和 ".." 外的所有条目，以及保持打开的目录句柄。
-/// 目录句柄用于后续的 ext info 批量查询（NtQueryInformationByName），
-/// 句柄在 HandleGuard drop 时自动关闭。
-/// 使用 64KB 缓冲区减少系统调用次数，并预分配 Vec 以减少堆重分配。
+/// Return all entries except "." and "..", along with the still-open directory handle.
+/// The directory handle is used for subsequent batch ext-info queries (NtQueryInformationByName)
+/// and is automatically closed when HandleGuard is dropped.
+/// Use a 64 KB buffer to reduce syscall count and preallocate the Vec to reduce heap reallocations.
 pub fn enumerate_dir(path: &Path, capacity: usize) -> io::Result<(HandleGuard, Vec<DirEntryInfo>)> {
     let funcs = ntdll_funcs();
     let guard = open_dir_handle(path)?;
@@ -462,11 +462,11 @@ pub fn enumerate_dir(path: &Path, capacity: usize) -> io::Result<(HandleGuard, V
     Ok((guard, result))
 }
 
-/// 使用 NtQueryDirectoryFileEx 批量枚举，并对每个子目录调用回调实现流式分发。
+/// Use NtQueryDirectoryFileEx to batch-enumerate and invoke the callback for each subdirectory for streaming dispatch.
 ///
-/// 子目录通过回调立即分发（无需等待完整枚举），所有条目（文件和子目录）
-/// 仍然收集到返回的 Vec 中，不遗漏任何条目。
-/// 返回保持打开的目录句柄，用于后续 ext info 批量查询。
+/// Subdirectories are dispatched immediately through the callback (without waiting for enumeration to finish), while all entries (files and subdirectories)
+/// are still collected in the returned Vec, so no entries are omitted.
+/// Return the still-open directory handle for subsequent batch ext-info queries.
 pub fn enumerate_dir_streaming(
     path: &Path,
     capacity: usize,
@@ -499,30 +499,28 @@ pub fn enumerate_dir_streaming(
     Ok((guard, result))
 }
 
-// ── Ext info 批量查询 ────────────────────────────────────────────────
+// ── Batch ext-info queries ───────────────────────────────────────────
 
-/// 使用 NtQueryInformationByName + FileStatInformation (class 68) 查询
-/// 目录条目的 NumberOfLinks。
+/// Query NumberOfLinks for directory entries using NtQueryInformationByName + FileStatInformation (class 68).
 ///
-/// 利用已打开的目录句柄 + 相对文件名查询，无需逐文件打开句柄，
-/// 消除 symlink_metadata 的路径解析开销。
+/// Query using the open directory handle and relative filename, without opening a handle for each file,
+/// eliminating symlink_metadata path-resolution overhead.
 ///
-/// 单线程遍历：NTFS 内核对同卷 MFT 查询有卷级互斥锁，多线程并发查同一卷
-/// 没有加速效果，反而有线程调度开销（实测 rayon par_iter_mut 8 线程 5.1s >
-/// 单线程 iter_mut 3.5s）。
+/// Iterate on a single thread: the NTFS kernel uses a volume-wide mutex for MFT queries on the same volume, so concurrent queries
+/// do not speed things up and instead add thread-scheduling overhead (measured: rayon par_iter_mut with 8 threads took 5.1s >
+/// single-threaded iter_mut at 3.5s).
 ///
-/// 线程安全：
-/// - HANDLE 是内核对象引用，多线程并发读操作（NtQueryInformationByName）
-///   是安全的——内核内部维护引用计数，CloseHandle 由 HandleGuard Drop 保证
-///   在所有查询完成后才执行。
-/// - 每次查询独立构造 UNICODE_STRING + OBJECT_ATTRIBUTES + stat_info_buf，
-///   无共享可变状态，无竞锁风险。
+/// Thread safety:
+/// - HANDLE is a kernel object reference; concurrent read operations (NtQueryInformationByName) are safe—the kernel maintains the reference count,
+///   and HandleGuard ensures CloseHandle is called only after all queries complete.
+/// - Each query constructs its own UNICODE_STRING, OBJECT_ATTRIBUTES, and stat_info_buf,
+///   with no shared mutable state or lock contention.
 ///
-/// Win10 1709+ 可用。老版本 Windows 或查询失败时 number_of_links 保持 None。
+/// Available on Windows 10 1709+. number_of_links remains None on older Windows versions or if the query fails.
 ///
-/// `query_file_nlinks`: 是否对普通文件也查询 NumberOfLinks。
-/// 设为 false 时仅对目录条目（FILE_ATTRIBUTE_DIRECTORY）查询，
-/// 文件条目 number_of_links 保持 None，减少约 50% 查询量。
+/// `query_file_nlinks`: whether to query NumberOfLinks for regular files as well.
+/// When false, query only directory entries (FILE_ATTRIBUTE_DIRECTORY);
+/// regular-file number_of_links remains None, reducing the query count by about 50%.
 pub fn batch_query_nlinks(
     entries: &mut [DirEntryInfo],
     dir_handle: &HandleGuard,
@@ -531,20 +529,20 @@ pub fn batch_query_nlinks(
     let funcs = ntdll_funcs();
     let query_by_name = match funcs.query_by_name {
         Some(f) => f,
-        None => return, // NtQueryInformationByName 不可用（老 Windows），保持 None
+        None => return, // NtQueryInformationByName is unavailable (older Windows); leave None.
     };
 
-    // 单线程遍历：NTFS 内核对同卷 MFT 查询有卷级互斥锁，
-    // 多线程并发查同一卷没有加速效果，反而有线程调度开销。
-    // 参见：batch_query_nlinks 性能分析（rayon par_iter_mut 8线程 5.1s > 单线程 3.5s）
+    // Iterate on a single thread: the NTFS kernel uses a volume-wide mutex for same-volume MFT queries,
+    // so concurrent queries do not speed things up and instead add thread-scheduling overhead.
+    // See the batch_query_nlinks performance analysis (rayon par_iter_mut with 8 threads: 5.1s > single-threaded: 3.5s).
     let root_handle_raw = dir_handle.handle() as isize;
-    // UTF-16 文件名缓冲区，跨条目复用避免 per-entry 堆分配。
-    // 260 容量覆盖 MAX_PATH，文件名超过时 Vec 自动扩容。
+    // Reuse the UTF-16 filename buffer across entries to avoid per-entry heap allocations.
+    // Capacity 260 covers MAX_PATH; Vec grows automatically for longer filenames.
     let mut wide_buf: Vec<u16> = Vec::with_capacity(260);
     entries.iter_mut().for_each(|entry| {
-        // 条件过滤：仅目录条目需要查询 NumberOfLinks（除非 query_file_nlinks=true）
+        // Filter: query NumberOfLinks only for directory entries unless query_file_nlinks=true.
         if !query_file_nlinks && (entry.file_attributes & FILE_ATTRIBUTE_DIRECTORY) == 0 {
-            return; // 非目录条目，跳过查询
+            return; // Not a directory entry; skip the query.
         }
 
         wide_buf.clear();
@@ -553,7 +551,7 @@ pub fn batch_query_nlinks(
             return;
         }
 
-        // 每次迭代独立的 FILE_STAT_INFORMATION 缓冲区（栈上 72 字节）
+        // Separate FILE_STAT_INFORMATION buffer for each iteration (72 bytes on the stack).
         let mut stat_info_buf = [0u8; std::mem::size_of::<FILE_STAT_INFORMATION>()];
 
         let byte_len = (wide_buf.len() * 2) as u16;
@@ -578,12 +576,12 @@ pub fn batch_query_nlinks(
         };
 
         // SAFETY:
-        // 1. obj_attrs 由 root_handle + 相对文件名构成，NtQueryInformationByName
-        //    使用 RootDirectory + ObjectName 定位文件，无需打开文件句柄
-        // 2. stat_info_buf 大小 = size_of::<FILE_STAT_INFORMATION>() = 72 字节
-        // 3. FILE_STAT_INFORMATION_CLASS = 68 是合法的信息类（Win10 1709+）
-        // 4. unicode_str.Buffer 指向 wide_buf，在本函数作用域内有效
-        // 5. root_handle 是内核句柄，单线程读操作安全
+        // 1. obj_attrs is built from root_handle and a relative filename; NtQueryInformationByName
+        //    locates the file using RootDirectory and ObjectName, without opening a file handle.
+        // 2. stat_info_buf size = size_of::<FILE_STAT_INFORMATION>() = 72 bytes.
+        // 3. FILE_STAT_INFORMATION_CLASS = 68 is a valid information class (Windows 10 1709+).
+        // 4. unicode_str.Buffer points to wide_buf, which remains valid for this function's scope.
+        // 5. root_handle is a kernel handle; single-threaded read access is safe.
         let status = unsafe {
             query_by_name(
                 &mut obj_attrs,
@@ -595,23 +593,23 @@ pub fn batch_query_nlinks(
         };
 
         if status == 0 {
-            // SAFETY: NtQueryInformationByName 成功时，缓冲区包含有效的 FILE_STAT_INFORMATION
+            // SAFETY: On success, NtQueryInformationByName fills the buffer with a valid FILE_STAT_INFORMATION.
             let stat_info = unsafe {
                 std::ptr::read_unaligned(stat_info_buf.as_ptr() as *const FILE_STAT_INFORMATION)
             };
             entry.number_of_links = Some(stat_info.NumberOfLinks);
         }
-        // 查询失败时保持 number_of_links = None
+        // Leave number_of_links as None if the query fails.
     });
 }
 
-/// 一次 GetVolumeInformationByHandleW 调用同时获取文件系统类型和卷序列号。
+/// Get the filesystem type and volume serial number in one GetVolumeInformationByHandleW call.
 ///
-/// 合并了原先的 detect_fs_type + query_volume_serial 两次调用，
-/// 消除冗余的 GetVolumeInformationByHandleW 系统调用。
-/// 失败时返回 (FsType::Unknown, None)。
+/// Combines the previous detect_fs_type and query_volume_serial calls,
+/// eliminating a redundant GetVolumeInformationByHandleW syscall.
+/// Returns (FsType::Unknown, None) on failure.
 pub fn detect_fs_type_and_vol_serial(dir_handle: &HandleGuard) -> (FsType, Option<u32>) {
-    let mut fs_name_buf = [0u16; 16]; // "NTFS"=4, "FAT32"=5, "exFAT"=5, 加 null 足够
+    let mut fs_name_buf = [0u16; 16]; // Enough for "NTFS"=4, "FAT32"=5, or "exFAT"=5, plus the null terminator.
     let mut volume_serial: u32 = 0;
     let success = unsafe {
         GetVolumeInformationByHandleW(
@@ -630,43 +628,43 @@ pub fn detect_fs_type_and_vol_serial(dir_handle: &HandleGuard) -> (FsType, Optio
         return (FsType::Unknown, None);
     }
 
-    // 找到 null terminator 的位置
+    // Find the null terminator.
     let len = fs_name_buf.iter().position(|&c| c == 0).unwrap_or(fs_name_buf.len());
     let fs_name = OsString::from_wide(&fs_name_buf[..len]);
-    // ASCII 大写比较（Windows 文件系统名称始终为 ASCII 大写）
+    // Compare as ASCII (Windows filesystem names are always ASCII uppercase).
     let fs_type = match fs_name.to_string_lossy().as_ref() {
         "NTFS" => FsType::Ntfs,
         "ReFS" => FsType::Refs,
         "FAT32" => FsType::Fat32,
         "exFAT" => FsType::ExFat,
-        "FAT" => FsType::Fat32,   // FAT12/FAT16 也无硬链接
-        "FAT16" => FsType::Fat32, // 同上
+        "FAT" => FsType::Fat32,   // FAT12/FAT16 also do not support hard links.
+        "FAT16" => FsType::Fat32, // Same as above.
         _ => FsType::Unknown,
     };
 
     (fs_type, Some(volume_serial))
 }
 
-// ── 文件系统类型检测 ────────────────────────────────────────────────────
+// ── Filesystem type detection ──────────────────────────────────────────
 
-/// Windows 文件系统类型，用于决定 number_of_links 查询策略。
+/// Windows filesystem type, used to determine the number_of_links query strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsType {
-    /// NTFS — 支持硬链接，需要逐文件查询 NumberOfLinks
+    /// NTFS — supports hard links; query NumberOfLinks for each file.
     Ntfs,
-    /// ReFS — 支持硬链接，需要逐文件查询 NumberOfLinks
+    /// ReFS — supports hard links; query NumberOfLinks for each file.
     Refs,
-    /// FAT32 — 不支持硬链接，NumberOfLinks 恒为 1
+    /// FAT32 — does not support hard links; NumberOfLinks is always 1.
     Fat32,
-    /// exFAT — 不支持硬链接，NumberOfLinks 恒为 1
+    /// exFAT — does not support hard links; NumberOfLinks is always 1.
     ExFat,
-    /// 未知文件系统 — 保守策略，逐文件查询
+    /// Unknown filesystem — conservatively query each file.
     Unknown,
 }
 
 impl FsType {
-    /// FAT 系列（FAT32/exFAT）不支持硬链接，NumberOfLinks 恒为 1。
-    /// 可以安全跳过 batch_query_nlinks，直接设 nlink=1。
+    /// The FAT family (FAT32/exFAT) does not support hard links; NumberOfLinks is always 1.
+    /// It is safe to skip batch_query_nlinks and set nlink=1 directly.
     #[inline]
     pub fn is_fat_family(self) -> bool {
         matches!(self, FsType::Fat32 | FsType::ExFat)

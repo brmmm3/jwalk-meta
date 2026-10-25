@@ -1,10 +1,10 @@
 //! Ordered queue backed by a channel.
 //!
-//! 完成判定基于 OrderedMatcher（DFS 前序）+ channel disconnect，不依赖手动
-//! pending_count。原先的 AtomicUsize 影子计数与 channel send 之间存在 race
-//! 窗口（producer send 成功但 fetch_add 之前 consumer 已 drain 并 fetch_sub），
-//! 导致 usize 下溢到 MAX。即便补救 fetch_add 也会在并发交错下制造虚假的
-//! 非零计数，且该计数在 Strict 模式下从不被读取——纯 UB 源 + 死代码。
+//! Completion is determined by OrderedMatcher (DFS preorder) and channel disconnect, not manual bookkeeping.
+//! pending_count. The previous AtomicUsize shadow counter had a race window with channel send
+//! (the producer could send successfully, then the consumer could drain and fetch_sub before fetch_add),
+//! causing usize to underflow to MAX. Even adding a compensating fetch_add could create a false
+//! nonzero count under concurrent interleavings, and the count was never read in Strict mode—pure UB risk and dead code.
 
 use crossbeam::channel::{self, Receiver, SendError, Sender, TryRecvError};
 use smallvec::smallvec;
@@ -15,10 +15,10 @@ use std::time::{Duration, Instant};
 
 use super::*;
 
-/// BinaryHeap 初始容量：256 是经验值，平衡初始内存占用和重新分配次数。
+/// Initial BinaryHeap capacity: 256 is an empirical balance between memory use and reallocations.
 const INITIAL_HEAP_CAPACITY: usize = 256;
 
-/// Strict 模式等待队头元素的最大时长，超时后返回 Empty 让出线程重试。
+/// Maximum time Strict mode waits for the head element before returning Empty and yielding for a retry.
 const STRICT_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub(crate) struct OrderedQueue<T>
@@ -95,11 +95,11 @@ where
     T: Send,
 {
     fn is_stop(&self) -> bool {
-        // Acquire: 确保看到 stop 标志的最新值。
+        // Acquire: ensure the latest stop flag is observed.
         self.stop.load(AtomicOrdering::Acquire)
     }
 
-    /// 批量 drain channel 中所有就绪元素到 receive_buffer。
+    /// Drain all ready elements from the channel into receive_buffer.
     fn drain_channel(&mut self) {
         while self.receive_buffer.len() < self.max_receive_buffer_size {
             if let Ok(ordered) = self.receiver.try_recv() {
@@ -110,11 +110,11 @@ where
         }
     }
 
-    /// Strict 模式：优先等待队头（looking_for），超时后返回 Empty 让出线程重试。
+    /// Strict mode: prioritize waiting for the head element (looking_for), then return Empty on timeout and yield for a retry.
     ///
-    /// 仅在堆中无目标元素时才 drain channel，减少堆膨胀。超时不弹非目标元素，
-    /// 避免 OrderedMatcher 状态错乱；producer 最终会 push 目标元素或遍历完成
-    /// 触发 channel disconnect。
+    /// Drain the channel only when the target is not in the heap, reducing heap growth. Do not pop a non-target element on timeout,
+    /// which would leave OrderedMatcher in an inconsistent state; the producer will eventually push the target or finish traversal,
+    /// disconnecting the channel.
     fn try_next_strict(&mut self) -> Result<Ordered<T>, TryRecvError> {
         let deadline = Instant::now() + STRICT_WAIT_TIMEOUT;
 
@@ -123,7 +123,7 @@ where
                 return Err(TryRecvError::Disconnected);
             }
 
-            // 仅当堆顶不是目标元素时才 drain channel，减少堆膨胀
+            // Drain the channel only if the heap head is not the target, reducing heap growth.
             let looking_for = &self.ordered_matcher.looking_for;
             let top_matches = self.receive_buffer
                 .peek()
@@ -132,7 +132,7 @@ where
                 self.drain_channel();
             }
 
-            // 检查 buffer 中是否有目标元素
+            // Check whether the buffer contains the target element.
             let looking_for = &self.ordered_matcher.looking_for;
             if let Some(top_ordered) = self.receive_buffer.peek() {
                 if top_ordered.index_path.eq(looking_for) {
@@ -145,11 +145,11 @@ where
             }
 
             if Instant::now() >= deadline {
-                // 超时：返回 Empty 让 yield 重试，不破坏 matcher 状态。
+                // Timeout: return Empty and let yield retry without disturbing matcher state.
                 return Err(TryRecvError::Empty);
             }
 
-            // 带超时的阻塞等待
+            // Blocking wait with a timeout.
             let remaining = deadline.saturating_duration_since(Instant::now());
             let wait_time = remaining.max(Duration::from_micros(100));
             match self.receiver.recv_timeout(wait_time) {
@@ -161,7 +161,7 @@ where
                 }
                 Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                     self.drain_channel();
-                    // 优先返回 looking_for 以保持正确性
+                    // Return looking_for first to preserve correctness.
                     if let Some(top) = self.receive_buffer.peek() {
                         if top.index_path.eq(&self.ordered_matcher.looking_for) {
                             let ordered = self.receive_buffer.pop().unwrap();
@@ -169,7 +169,7 @@ where
                             return Ok(ordered);
                         }
                     }
-                    // channel 断开后按堆序排空剩余元素（DFS 自然序）
+                    // After channel disconnect, drain remaining elements in heap order (natural DFS order).
                     if let Some(fallback) = self.receive_buffer.pop() {
                         return Ok(fallback);
                     }

@@ -25,8 +25,8 @@ where
     pending_count: Arc<AtomicUsize>,
 }
 
-/// BinaryHeap 初始容量：256 是经验值，平衡初始内存占用和重新分配次数。
-/// 普通目录子项数通常 < 256，避免首次扩展。
+/// Initial BinaryHeap capacity: 256 is an empirical balance between memory use and reallocations.
+/// Most directories have fewer than 256 children, avoiding the first growth allocation.
 const INITIAL_HEAP_CAPACITY: usize = 256;
 
 pub(crate) fn new_priority_queue<T>(
@@ -57,15 +57,15 @@ impl<T> PriorityQueue<T>
 where
     T: Send,
 {
-    /// 阻塞 push：使用 send 确保子目录调度不丢失。
-    /// channel 容量由调用方传入（默认 4096），大目录场景下几乎不会阻塞。
-    /// 之前用 try_send 在 channel 满时丢弃调度，导致目录分支被跳过、并行度下降。
+    /// Blocking push: use send to ensure subdirectory scheduling is not lost.
+    /// Channel capacity is supplied by the caller (4096 by default); it is rarely full for large directories.
+    /// Previously, try_send dropped scheduling requests when the channel was full, skipping directory branches and reducing parallelism.
     pub fn push(&self, weighted: Weighted<T>) -> Result<(), SendError<Weighted<T>>> {
-        // fetch_add 必须先于 send：消除 send→fetch_add 窗口内的 pending_count==0 误判。
-        // 修复前（send 先于 fetch_add）：consumer 可能在两者之间 drain 并看到
-        // pending_count==0，提前返回 Disconnected，导致 par_bridge 停止、后续元素丢失。
-        // 修复后（fetch_add 先于 send）：元素入 channel 时 pending_count 已 ≥1，
-        // consumer 永远不会误判。send 失败时 fetch_sub 回滚。
+        // fetch_add must precede send to eliminate a false pending_count==0 during the send->fetch_add window.
+        // Before the fix (send before fetch_add), the consumer could drain between the two operations, see
+        // pending_count==0, and return Disconnected early, stopping par_bridge and losing subsequent elements.
+        // With the fix (fetch_add before send), pending_count is >= 1 when an element enters the channel,
+        // so the consumer cannot misjudge it. If send fails, fetch_sub rolls back the count.
         self.pending_count.fetch_add(1, AtomicOrdering::Release);
         match self.sender.send(weighted) {
             Ok(()) => Ok(()),
@@ -77,9 +77,9 @@ where
     }
 
     pub fn complete_item(&self) {
-        // AcqRel：consumer 侧 try_next 通过 load(Acquire) 读取，配对保证可见性。
-        // fetch_add 先于 send 保证了不会有下溢（complete_item 只在元素被 consumer
-        // 消费后、worker 处理完时调用，此时 pending_count 必然 ≥1）。
+        // AcqRel: consumer-side try_next reads via load(Acquire); the pair guarantees visibility.
+        // fetch_add preceding send prevents underflow (complete_item is called only after an element
+        // has been consumed by a consumer and processed by a worker, when pending_count must be >= 1).
         self.pending_count.fetch_sub(1, AtomicOrdering::AcqRel);
     }
 }
@@ -102,18 +102,18 @@ where
     T: Send,
 {
     fn pending_count(&self) -> usize {
-        // Acquire: 与 push 中的 Release 配对，确保看到完整的数据写入。
+        // Acquire: pairs with the Release in push to ensure complete data writes are visible.
         self.pending_count.load(AtomicOrdering::Acquire)
     }
 
     fn is_stop(&self) -> bool {
-        // Acquire: 确保看到 stop 标志的最新值，由 producer 端 Release 写入。
+        // Acquire: ensure the latest stop flag written with Release by the producer is observed.
         self.stop.load(AtomicOrdering::Acquire)
     }
 
     fn try_next(&mut self) -> Result<Weighted<T>, TryRecvError> {
-        // 自适应退避：热路径短等待（10μs），逐步增长到 1ms
-        // 避免空闲时空转浪费 CPU，同时保持对新数据的快速响应
+        // Adaptive backoff: short waits (10 μs) on the hot path, gradually increasing to 1 ms.
+        // Avoid wasting CPU while idle while still responding quickly to new data.
         let mut spin_count: u32 = 0;
 
         loop {
@@ -121,10 +121,10 @@ where
                 return Err(TryRecvError::Disconnected);
             }
 
-            // 先非阻塞 drain 所有已就绪元素
+            // First, non-blockingly drain all ready elements.
             while let Ok(weighted) = self.receiver.try_recv() {
                 self.receive_buffer.push(weighted);
-                spin_count = 0; // 有数据时重置退避计数
+                spin_count = 0; // Reset backoff count when data is available.
             }
 
             if let Some(weighted) = self.receive_buffer.pop() {
@@ -133,7 +133,7 @@ where
                 return Err(TryRecvError::Disconnected);
             }
 
-            // 自适应等待：逐步增加超时，减少空转 CPU 浪费
+            // Adaptive wait: gradually increase the timeout to reduce idle CPU usage.
             let timeout = match spin_count {
                 0..=10 => std::time::Duration::from_micros(10),
                 11..=50 => std::time::Duration::from_micros(100),

@@ -1,7 +1,7 @@
-//! SMB 单目录枚举 benchmark。
+//! Benchmark enumeration of a single SMB directory.
 //!
-//! 使用 WalkDir(max_depth=1) 测试单目录枚举性能，
-//! 内部调用 enumerate_dir，eprintln 会输出检测到的缓冲区大小。
+//! Use WalkDir(max_depth=1) to measure single-directory enumeration performance.
+//! This calls enumerate_dir internally; eprintln reports the detected buffer size.
 //!
 //! Usage: cargo +nightly run --example smb_enum_bench -- <path>
 
@@ -12,11 +12,11 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| r"Z:\品质部".to_string());
 
-    println!("=== SMB 单目录枚举 benchmark ===");
+    println!("=== SMB single-directory enumeration benchmark ===");
     println!("Path: {}", path);
     println!();
 
-    // 第一次运行 (cold)
+    // First run (cold cache).
     println!("--- Cold run (max_depth=1) ---");
     let start = Instant::now();
     let mut total = 0usize;
@@ -47,7 +47,7 @@ fn main() {
         total as f64 / elapsed.as_secs_f64().max(0.001)
     );
 
-    // 第二次运行 (warm)
+    // Second run (warm cache).
     println!();
     println!("--- Warm run (max_depth=1) ---");
     let start2 = Instant::now();

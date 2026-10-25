@@ -1,12 +1,12 @@
 
-//! class 77 (FileStatBasicInformation) 用于 NtQueryDirectoryFileEx 目录枚举的 PoC。
+//! Proof of concept for using class 77 (FileStatBasicInformation) with NtQueryDirectoryFileEx directory enumeration.
 //!
-//! 目标：验证 class 77 buffer 是否包含 LinkCount 字段。
-//! 思路：先以 class 37 (FILE_ID_BOTH_DIR_INFO，已知格式) 取得文件名列表作锚点，
-//!       再以 class 77 取得原始 buffer，用文件名反向定位 entry 边界，
-//!       推断 entry header 大小，分析字段布局。
+//! Goal: verify whether the class 77 buffer contains a LinkCount field.
+//! Approach: first use class 37 (FILE_ID_BOTH_DIR_INFO, a known format) to get a filename list as an anchor,
+//!           then get the raw buffer with class 77 and use filenames to locate entry boundaries in reverse,
+//!           infer the entry header size, and analyze the field layout.
 //!
-//! 不修改任何 src/ 生产代码；不引入新依赖；动态加载 ntdll。
+//! Does not modify production code under src/ or add dependencies; dynamically loads ntdll.
 
 
 use std::env;
@@ -25,17 +25,17 @@ use winapi::um::winnt::{
     FILE_LIST_DIRECTORY, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE,
 };
 
-// ── 信息类常量 ──────────────────────────────────────────────────────────
+// ── Information class constants ───────────────────────────────────────
 
-/// FILE_ID_BOTH_DIR_INFORMATION (基线)
+/// FILE_ID_BOTH_DIR_INFORMATION (baseline).
 const FILE_ID_BOTH_DIR_INFO_CLASS: u32 = 37;
 
-/// FileStatBasicInformation (测试目标)
+/// FileStatBasicInformation (test target).
 const FILE_STAT_BASIC_INFORMATION_CLASS: u32 = 77;
 
 const STATUS_NO_MORE_FILES: i32 = -2147483642; // 0x80000006
 
-// ── FFI 类型 ────────────────────────────────────────────────────────────
+// ── FFI types ──────────────────────────────────────────────────────────
 
 #[repr(C)]
 #[allow(non_snake_case)]
@@ -59,7 +59,7 @@ type NtQueryDirectoryFileExFn = unsafe extern "system" fn(
     RestartScan: i32,
 ) -> i32;
 
-// ── class 37 已知结构（仅用于解析基线） ────────────────────────────────
+// ── Known class 37 structure (used only to parse the baseline) ─────────
 
 #[repr(C)]
 #[allow(non_snake_case)]
@@ -82,7 +82,7 @@ struct FILE_ID_BOTH_DIR_INFO {
     FileName: [u16; 1],
 }
 
-// ── NtQueryDirectoryFile（不带 Ex）FFI ——验证两个 API 都不支持 class 77 ──
+// ── NtQueryDirectoryFile (without Ex) FFI — verify whether both APIs reject class 77 ──
 
 /// UNICODE_STRING for NtQueryDirectoryFile's FileName parameter.
 #[repr(C)]
@@ -122,7 +122,7 @@ fn load_query_dir_no_ex() -> Option<NtQueryDirectoryFileFn> {
     }
 }
 
-// ── 单文件 class 77 健康检查所需 FFI（NtQueryInformationByName） ──
+// ── FFI for the single-file class 77 health check (NtQueryInformationByName) ──
 
 #[repr(C)]
 #[allow(non_snake_case)]
@@ -154,12 +154,12 @@ type NtQueryInformationByNameFn = unsafe extern "system" fn(
     FileInformationClass: u32,
 ) -> i32;
 
-/// 单文件 class 77 返回结构（Microsoft 文档，用于健康检查）。
+/// Single-file class 77 return structure (Microsoft documentation; used for the health check).
 #[repr(C)]
 #[allow(non_snake_case)]
-/// 单文件 class 77 返回结构（Microsoft 文档）。
-/// 注意 EffectiveAccess 是 LARGE_INTEGER（8 字节），不是 ULONG。
-/// 大小 = 7*8 + 4*3 + 4(padding) + 8 = 80 字节。
+/// Single-file class 77 return structure (Microsoft documentation).
+/// Note: EffectiveAccess is a LARGE_INTEGER (8 bytes), not a ULONG.
+/// Size = 7*8 + 4*3 + 4 (padding) + 8 = 80 bytes.
 #[repr(C)]
 #[allow(non_snake_case)]
 struct FILE_STAT_BASIC_INFORMATION {
@@ -176,7 +176,7 @@ struct FILE_STAT_BASIC_INFORMATION {
     EffectiveAccess: i64,
 }
 
-/// 加载 NtQueryInformationByName。
+/// Load NtQueryInformationByName.
 fn load_query_by_name() -> Option<NtQueryInformationByNameFn> {
     let name = to_wide_null("ntdll.dll\0");
     let module = unsafe { LoadLibraryW(name.as_ptr()) };
@@ -191,8 +191,8 @@ fn load_query_by_name() -> Option<NtQueryInformationByNameFn> {
     }
 }
 
-/// 验证系统认识 class 77：用 NtQueryInformationByName 查询一个已知文件。
-/// 成功则返回 Some(NumberOfLinks)，失败返回 None。
+/// Verify that the system recognizes class 77 by querying a known file with NtQueryInformationByName.
+/// Return Some(NumberOfLinks) on success, or None on failure.
 fn test_single_file_class77(
     dir_handle: HANDLE,
     entries: &[(String, u32, u32)],
@@ -200,12 +200,12 @@ fn test_single_file_class77(
     let query_by_name = match load_query_by_name() {
         Some(f) => f,
         None => {
-            println!("  NtQueryInformationByName 不可用（Win10 1709-）");
+            println!("  NtQueryInformationByName is unavailable (Windows 10 version 1709 or earlier)");
             return None;
         }
     };
 
-    // 取第一个条目作为测试目标
+    // Use the first entry as the test target.
     let (name, _, _) = entries.first()?;
     let mut wide: Vec<u16> = name.encode_utf16().collect();
     if wide.is_empty() {
@@ -225,9 +225,9 @@ fn test_single_file_class77(
         SecurityDescriptor: ptr::null_mut(),
         SecurityQualityOfService: ptr::null_mut(),
     };
-    // size 扫描：从 64 到 128 找出系统接受的 buffer size
+    // Scan sizes from 64 to 128 to find a buffer size accepted by the system.
     let declared_size = std::mem::size_of::<FILE_STAT_BASIC_INFORMATION>();
-    println!("  声明结构体 size = {}", declared_size);
+    println!("  Declared structure size = {}", declared_size);
     let mut found_size: Option<usize> = None;
     for probe_size in (64..=128).step_by(4) {
         let mut probe_buf = vec![0u8; probe_size];
@@ -243,7 +243,7 @@ fn test_single_file_class77(
         };
         let status_hex = format!("0x{:08x}", status_probe as u32);
         if status_probe == 0 {
-            println!("  size {} → 成功 ✓", probe_size);
+            println!("  size {} → success ✓", probe_size);
             found_size = Some(probe_size);
             break;
         } else {
@@ -254,12 +254,12 @@ fn test_single_file_class77(
     let valid_size = match found_size {
         Some(s) => s,
         None => {
-            println!("  所有 size 都失败——class 77 在本系统不可用");
+            println!("  All sizes failed — class 77 is unavailable on this system");
             return None;
         }
     };
 
-    // 用正确 size 重新调用并解析
+    // Call again with the correct size and parse the result.
     let mut stat_buf = vec![0u8; valid_size];
     let mut iosb = IO_STATUS_BLOCK { Status: 0, Information: 0 };
     let status = unsafe {
@@ -272,10 +272,10 @@ fn test_single_file_class77(
         )
     };
     if status != 0 {
-        println!("  二次调用失败：NTSTATUS 0x{:08x}", status as u32);
+        println!("  Second call failed: NTSTATUS 0x{:08x}", status as u32);
         return None;
     }
-    // 从 valid_size buffer 中提取 NumberOfLinks（偏移 64，4 字节，FILE_STAT_BASIC_INFORMATION 布局）
+    // Extract NumberOfLinks from the valid_size buffer (offset 64, 4 bytes, per the FILE_STAT_BASIC_INFORMATION layout).
     if valid_size >= 68 {
         let nlinks = u32::from_ne_bytes([
             stat_buf[64], stat_buf[65], stat_buf[66], stat_buf[67],
@@ -284,17 +284,17 @@ fn test_single_file_class77(
             stat_buf[56], stat_buf[57], stat_buf[58], stat_buf[59],
         ]);
         println!(
-            "  成功：\"{}\" NumberOfLinks={} FileAttributes={:#x} (buffer size {})",
+            "  Success: \"{}\" NumberOfLinks={} FileAttributes={:#x} (buffer size {})",
             name, nlinks, attrs, valid_size
         );
         Some(nlinks)
     } else {
-        println!("  valid_size {} 不足包含 NumberOfLinks 字段", valid_size);
+        println!("  valid_size {} is too small to contain the NumberOfLinks field", valid_size);
         None
     }
 }
 
-// ── 辅助 ────────────────────────────────────────────────────────────────
+// ── Helpers ────────────────────────────────────────────────────────────
 
 fn to_wide_null(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
@@ -337,7 +337,7 @@ fn load_ntdll_query_dir() -> NtQueryDirectoryFileExFn {
     let name = to_wide_null("ntdll.dll\0");
     let module = unsafe { LoadLibraryW(name.as_ptr()) };
     if module.is_null() {
-        eprintln!("错误：无法加载 ntdll.dll");
+        eprintln!("Error: failed to load ntdll.dll");
         process::exit(1);
     }
     let proc = unsafe {
@@ -347,13 +347,13 @@ fn load_ntdll_query_dir() -> NtQueryDirectoryFileExFn {
         )
     };
     if proc.is_null() {
-        eprintln!("错误：无法获取 NtQueryDirectoryFileEx 地址");
+        eprintln!("Error: failed to get the address of NtQueryDirectoryFileEx");
         process::exit(1);
     }
     unsafe { std::mem::transmute(proc) }
 }
 
-/// 用 NT API 调用一次 NtQueryDirectoryFileEx，返回填入的 buffer 和实际写入字节数。
+/// Call NtQueryDirectoryFileEx once using the NT API and return the filled buffer and number of bytes written.
 fn query_dir_once(
     query: NtQueryDirectoryFileExFn,
     handle: HANDLE,
@@ -363,7 +363,7 @@ fn query_dir_once(
     query_dir_once_full(query, handle, info_class, 0, ptr::null(), restart)
 }
 
-/// 完整参数版的 NtQueryDirectoryFileEx 调用。
+/// Call NtQueryDirectoryFileEx with the full parameter set.
 fn query_dir_once_full(
     query: NtQueryDirectoryFileExFn,
     handle: HANDLE,
@@ -392,7 +392,7 @@ fn query_dir_once_full(
             restart,
         )
     };
-    // STATUS_NO_MORE_FILES 不是错误，只是没更多条目
+    // STATUS_NO_MORE_FILES is not an error; it only indicates there are no more entries.
     if status < 0 && status != STATUS_NO_MORE_FILES {
         return Err(io::Error::from_raw_os_error(status));
     }
@@ -401,10 +401,10 @@ fn query_dir_once_full(
     Ok((buffer, written))
 }
 
-/// dump buffer 前 max_bytes 字节，hex + ASCII，类似 xxd 输出。
+/// Dump the first max_bytes of the buffer as hex + ASCII, similar to xxd output.
 fn dump_hex(buffer: &[u8], max_bytes: usize, label: &str) {
     let n = buffer.len().min(max_bytes);
-    println!("\n=== {} (前 {} 字节，总 buffer 长度 {}) ===", label, n, buffer.len());
+    println!("\n=== {} (first {} bytes, total buffer length {}) ===", label, n, buffer.len());
     for chunk_start in (0..n).step_by(16) {
         let chunk_end = (chunk_start + 16).min(n);
         let chunk = &buffer[chunk_start..chunk_end];
@@ -420,14 +420,14 @@ fn dump_hex(buffer: &[u8], max_bytes: usize, label: &str) {
         println!("{:08x}: {:<48} {}", chunk_start, hex, ascii);
     }
     if buffer.len() > max_bytes {
-        println!("... (省略 {} 字节)", buffer.len() - max_bytes);
+        println!("... ({} bytes omitted)", buffer.len() - max_bytes);
     }
 }
 
-// ── 解析 class 37 buffer（已知格式），取得文件名锚点 ───────────────────
+// ── Parse the class 37 buffer (known format) to obtain filename anchors ─
 
 fn parse_class37(buffer: &[u8]) -> Vec<(String, u32, u32)> {
-    // 返回 (文件名, NextEntryOffset, entry 起始 offset)
+    // Return (filename, NextEntryOffset, entry start offset).
     let mut out = Vec::new();
     let mut offset: usize = 0;
     let header_size = std::mem::size_of::<FILE_ID_BOTH_DIR_INFO>();
@@ -444,7 +444,7 @@ fn parse_class37(buffer: &[u8]) -> Vec<(String, u32, u32)> {
             std::slice::from_raw_parts(buffer.as_ptr().add(offset + name_off) as *const u16, name_chars)
         };
         let name = OsString::from_wide(name_slice).to_string_lossy().into_owned();
-        // 跳过 "." 和 ".."
+        // Skip "." and "..".
         if name != "." && name != ".." {
             out.push((name, entry.NextEntryOffset, offset as u32));
         }
@@ -456,7 +456,7 @@ fn parse_class37(buffer: &[u8]) -> Vec<(String, u32, u32)> {
     out
 }
 
-/// 在 buffer 中搜索 UTF-16 编码的文件名，返回找到的所有偏移。
+/// Search the buffer for a UTF-16-encoded filename and return all matching offsets.
 fn find_utf16_occurrences(buffer: &[u8], needle: &str) -> Vec<usize> {
     let encoded: Vec<u16> = needle.encode_utf16().collect();
     if encoded.is_empty() {
@@ -479,8 +479,8 @@ fn find_utf16_occurrences(buffer: &[u8], needle: &str) -> Vec<usize> {
 }
 
 
-/// 读取 entry 假设起始位置（NextEntryOffset 假定在 offset 0），尝试用链表方式遍历。
-/// 返回每个推测的 entry 起点。
+/// Read entries assuming the supplied position is the entry start (NextEntryOffset is assumed to be at offset 0),
+/// then attempt linked-list traversal. Return each inferred entry start.
 fn walk_next_offset_chain(buffer: &[u8]) -> Vec<usize> {
     let mut offsets = vec![0usize];
     let mut cur = 0usize;
@@ -510,56 +510,56 @@ fn main() {
     } else {
         Path::new(".")
     };
-    println!("测试目录：{}", dir.display());
+    println!("Test directory: {}", dir.display());
 
     let query = load_ntdll_query_dir();
     let guard = match open_dir(dir) {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("打开目录失败：{}", e);
+            eprintln!("Failed to open directory: {}", e);
             process::exit(1);
         }
     };
 
-    // ── 步骤 1：用 class 37 取得基线 ────────────────────────────────
+    // ── Step 1: obtain a baseline using class 37 ────────────────────
     let (buf37, _) = match query_dir_once(query, guard.0, FILE_ID_BOTH_DIR_INFO_CLASS, 1) {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("class 37 调用失败：{}", e);
+            eprintln!("class 37 call failed: {}", e);
             process::exit(1);
         }
     };
 
     let class37_entries = parse_class37(&buf37);
-    println!("\nclass 37 (FILE_ID_BOTH_DIR_INFO) 解析到 {} 个条目（不含 . / ..）：", class37_entries.len());
+    println!("\nclass 37 (FILE_ID_BOTH_DIR_INFO) parsed {} entries (excluding . / ..):", class37_entries.len());
     for (i, (name, nxt, off)) in class37_entries.iter().take(10).enumerate() {
         println!("  [{}] offset={} NextEntryOffset={} name=\"{}\"", i, off, nxt, name);
     }
     if class37_entries.len() < 3 {
-        eprintln!("警告：测试目录条目太少（{}），建议放在至少 5 个文件的目录下重跑", class37_entries.len());
+        eprintln!("Warning: too few entries in the test directory ({}); rerun in a directory containing at least 5 files", class37_entries.len());
     }
 
-    // dump class 37 前 1024 字节
+    // Dump the first 1024 bytes of class 37.
     dump_hex(&buf37, 1024, "class 37 buffer");
 
-    // ── 步骤 2：尝试 class 77（FileStatBasicInformation） ───────────
-    // 重新打开目录以重启扫描（避免与 class 37 的扫描游标冲突）
+    // ── Step 2: try class 77 (FileStatBasicInformation) ────────────
+    // Reopen the directory to restart enumeration (avoiding a conflict with the class 37 scan cursor).
     drop(guard);
     let guard2 = match open_dir(dir) {
         Ok(g) => g,
         Err(e) => {
-            eprintln!("第二次打开目录失败：{}", e);
+            eprintln!("Failed to reopen directory: {}", e);
             process::exit(1);
         }
     };
 
-    // 尝试多种参数组合调用 class 77：
+    // Try class 77 with several parameter combinations:
     //   (a) ReturnSingleEntry=0, FileName=NULL, RestartScan=1
     //   (b) ReturnSingleEntry=0, FileName="*", RestartScan=1
     //   (c) ReturnSingleEntry=1, FileName=NULL, RestartScan=1
     let star_wildcard = to_wide_null("*");
     let mut buf77: Option<(Vec<u8>, usize)> = None;
-    println!("\n=== class 77 (FileStatBasicInformation) 多参数组合测试 ===");
+    println!("\n=== class 77 (FileStatBasicInformation) parameter-combination tests ===");
     for (label, ret_single, fname, restart) in [
         ("(a) ret_single=0, FileName=NULL, restart=1", 0i32, ptr::null::<u16>() as LPCWSTR, 1i32),
         ("(b) ret_single=0, FileName=*",      0i32, star_wildcard.as_ptr()  as LPCWSTR, 1i32),
@@ -567,19 +567,19 @@ fn main() {
     ] {
         match query_dir_once_full(query, guard2.0, FILE_STAT_BASIC_INFORMATION_CLASS, ret_single, fname, restart) {
             Ok((b, n)) => {
-                println!("  {}→ 成功，写入 {} 字节", label, n);
+                println!("  {}→ success, wrote {} bytes", label, n);
                 if buf77.is_none() {
                     buf77 = Some((b, n));
                 }
             }
             Err(e) => {
-                println!("  {}→ 失败：NTSTATUS {} (raw os error {})", label, e, e.raw_os_error().unwrap_or(0));
+                println!("  {}→ failed: NTSTATUS {} (raw OS error {})", label, e, e.raw_os_error().unwrap_or(0));
             }
         }
     }
 
-    // 额外验证：NtQueryDirectoryFile（不带 Ex）是否支持 class 77
-    println!("\n=== 额外验证：NtQueryDirectoryFile（不带 Ex）+ class 77 ===");
+    // Additional check: does NtQueryDirectoryFile (without Ex) support class 77?
+    println!("\n=== Additional check: NtQueryDirectoryFile (without Ex) + class 77 ===");
     if let Some(query_dir_no_ex) = load_query_dir_no_ex() {
         let star_name = to_wide_null("*");
         let mut ustr = UNICODE_STRING_NAME {
@@ -605,56 +605,56 @@ fn main() {
             )
         };
         if status == 0 {
-            println!("  NtQueryDirectoryFile + class 77 成功，写入 {} 字节", iosb.Information);
+            println!("  NtQueryDirectoryFile + class 77 succeeded, wrote {} bytes", iosb.Information);
         } else {
-            println!("  NtQueryDirectoryFile + class 77 失败：0x{:08x}", status as u32);
+            println!("  NtQueryDirectoryFile + class 77 failed: 0x{:08x}", status as u32);
         }
     } else {
-        println!("  NtQueryDirectoryFile 不可加载");
+        println!("  NtQueryDirectoryFile could not be loaded");
     }
 
-    // 单文件 class 77 健康检查（验证系统认识这个 info class）
-    println!("\n=== 健康检查：单文件 class 77 (NtQueryInformationByName) ===");
+    // Single-file class 77 health check (verify that the system recognizes this info class).
+    println!("\n=== Health check: single-file class 77 (NtQueryInformationByName) ===");
     let single_file_class77_ok = test_single_file_class77(guard2.0, &class37_entries);
 
     let (buf77, written77) = match buf77 {
         Some(r) => r,
         None => {
-            println!("\n=== class 77 目录枚举全面失败 ===");
+            println!("\n=== All class 77 directory-enumeration attempts failed ===");
             if single_file_class77_ok.is_some() {
-                println!("但单文件查询成功——说明系统认识 class 77，但 NtQueryDirectoryFileEx 拒绝用于目录枚举。");
-                println!("结论：class 77 不可用于目录枚举，优化方向关闭。");
+                println!("The single-file query succeeded, so the system recognizes class 77, but NtQueryDirectoryFileEx rejects it for directory enumeration.");
+                println!("Conclusion: class 77 cannot be used for directory enumeration; abandon this optimization.");
             } else {
-                println!("单文件查询也失败——系统不认识 class 77，可能 Windows 版本过旧。");
+                println!("The single-file query also failed — the system may not recognize class 77, possibly because Windows is too old.");
             }
-            println!("提示：Windows build 号见 PoC 启动信息（PowerShell: `[Environment]::OSVersion.Version.Build`）");
+            println!("Tip: see the PoC startup information for the Windows build number (PowerShell: `[Environment]::OSVersion.Version.Build`)");
             return;
         }
     };
 
     println!(
-        "\n=== class 77 (FileStatBasicInformation) 调用成功，写入 {} 字节 ===",
+        "\n=== class 77 (FileStatBasicInformation) call succeeded, wrote {} bytes ===",
         written77
     );
 
-    // dump class 77 前 2048 字节（用于字段分析）
+    // Dump the first 2048 bytes of class 77 for field analysis.
     dump_hex(&buf77, 2048, "class 77 buffer");
 
-    // ── 步骤 3：链表遍历（假设 NextEntryOffset 在 entry 开头） ─────
+    // ── Step 3: linked-list traversal (assuming NextEntryOffset is at the start of each entry) ─
     let chain = walk_next_offset_chain(&buf77);
-    println!("\nclass 77 NextEntryOffset 链推测 entry 起点：{:?}", chain);
+    println!("\nclass 77 NextEntryOffset chain: inferred entry starts: {:?}", chain);
 
-    // ── 步骤 4：用已知文件名作锚点，反向定位 entry header ──────────
-    println!("\n=== 用 class 37 文件名在 class 77 buffer 中查找锚点 ===");
+    // ── Step 4: use known filenames as anchors to locate entry headers in reverse ───────────
+    println!("\n=== Searching the class 77 buffer for anchors using class 37 filenames ===");
     let mut anchors = Vec::new();
     for (name, _, _) in &class37_entries {
         let hits = find_utf16_occurrences(&buf77, name);
         if hits.is_empty() {
-            println!("  \"{}\": 未找到", name);
+            println!("  \"{}\": not found", name);
             continue;
         }
         let pos = hits[0];
-        // 二次确认：是否落在 chain 中的某个 entry 内
+        // Confirm that this falls within an entry in the chain.
         let entry_start = chain
             .iter()
             .filter(|&&c| c <= pos)
@@ -669,9 +669,9 @@ fn main() {
         anchors.push((name.clone(), pos, entry_start, header_size));
     }
 
-    // ── 步骤 5：分析 entry header 字段布局 ─────────────────────────
+    // ── Step 5: analyze the entry header field layout ──────────────
     if !anchors.is_empty() {
-        // 推算 header size：取所有锚点中最常见的 header_size
+        // Estimate the header size using the most common header_size among all anchors.
         use std::collections::HashMap;
         let mut size_count: HashMap<usize, usize> = HashMap::new();
         for (_, _, _, hs) in &anchors {
@@ -683,17 +683,17 @@ fn main() {
             .map(|(&s, _)| s)
             .unwrap_or(0);
         println!(
-            "\nclass 77 entry header 推测大小（含 NextEntryOffset，不含 FileName）：{} 字节",
+            "\nInferred class 77 entry-header size (including NextEntryOffset, excluding FileName): {} bytes",
             common_header
         );
 
-        // dump 第一个 entry 的 header bytes 详细分析 + 关键字段搜索
+        // Dump the first entry's header bytes for detailed analysis and search for key fields.
         if let Some((name, pos, entry_start, _)) = anchors.first() {
             let entry_start = *entry_start;
             let header_end = *pos;
             let baseline_name = name.clone();
             println!(
-                "\n=== 第一个 entry header 详细分析 (\"{}\", offset {}..{}) ===",
+                "\n=== Detailed analysis of the first entry header (\"{}\", offset {}..{}) ===",
                 baseline_name, entry_start, header_end
             );
             let header = &buf77[entry_start..header_end];
@@ -731,13 +731,13 @@ fn main() {
                 );
             }
 
-            // 关键字段搜索：用 class 37 同名 entry 的时间戳在 class 77 header 中找匹配
-            // FILE_STAT_BASIC_INFORMATION 单文件布局（Microsoft 文档）：
+            // Key-field search: use the timestamp of a same-named class 37 entry to find a match in the class 77 header.
+            // Single-file FILE_STAT_BASIC_INFORMATION layout (Microsoft documentation):
             //   FileId(0) CreationTime(8) LastAccessTime(16) LastWriteTime(24) ChangeTime(32)
             //   AllocationSize(40) EndOfFile(48) FileAttributes(56,4) ReparseTag(60,4)
             //   NumberOfLinks(64,4) EffectiveAccess(68,8) = 72 bytes
-            // 目录枚举会在表头加 NextEntryOffset + FileNameLength + FileName[]
-            println!("\n=== LinkCount 字段位置搜索 ===");
+            // Directory enumeration adds NextEntryOffset + FileNameLength + FileName[] to the header.
+            println!("\n=== Searching for the LinkCount field ===");
             if let Some((_, _, c37_off)) = class37_entries
                 .iter()
                 .find(|(n, _, _)| *n == baseline_name)
@@ -746,12 +746,12 @@ fn main() {
                 let c37_entry =
                     unsafe { std::ptr::read_unaligned(c37_ptr as *const FILE_ID_BOTH_DIR_INFO) };
                 println!(
-                    "  对照基线 \"{}\": LastWriteTime={:#x}, EndOfFile={:#x}, FileAttributes={:#x}",
+                    "  Baseline reference \"{}\": LastWriteTime={:#x}, EndOfFile={:#x}, FileAttributes={:#x}",
                     baseline_name, c37_entry.LastWriteTime as u64, c37_entry.EndOfFile as u64,
                     c37_entry.FileAttributes
                 );
                 println!(
-                    "  在 class 77 header 内搜索 LastWriteTime 字节序列（{}, 8 bytes）",
+                    "  Searching the class 77 header for the LastWriteTime byte sequence ({}, 8 bytes)",
                     c37_entry.LastWriteTime
                 );
                 let ts_bytes = c37_entry.LastWriteTime.to_ne_bytes();
@@ -759,12 +759,12 @@ fn main() {
                 if let Some(idx_in_header) = header_slice.windows(8).position(|w| w == ts_bytes.as_slice()) {
                     let abs_off = entry_start + idx_in_header;
                     println!(
-                        "  → 找到 LastWriteTime 字节在 entry_start + {} (绝对偏移 {})",
+                        "  → Found LastWriteTime bytes at entry_start + {} (absolute offset {})",
                         idx_in_header, abs_off
                     );
-                    // 按 FILE_STAT_BASIC_INFORMATION 布局推算：NumberOfLinks 相对 LastWriteTime 偏移 = 64 - 24 = 40 字节
+                    // Based on the FILE_STAT_BASIC_INFORMATION layout: NumberOfLinks offset relative to LastWriteTime = 64 - 24 = 40 bytes.
                     println!(
-                        "  → 按 FILE_STAT_BASIC_INFORMATION 布局：NumberOfLinks 应在 LastWriteTime + 40 字节处"
+                        "  → According to the FILE_STAT_BASIC_INFORMATION layout, NumberOfLinks should be 40 bytes after LastWriteTime"
                     );
                     let nlinks_off = idx_in_header + 40;
                     if entry_start + nlinks_off + 4 <= buf77.len() {
@@ -775,20 +775,20 @@ fn main() {
                             buf77[entry_start + nlinks_off + 3],
                         ]);
                         println!(
-                            "  → 候选 NumberOfLinks 字段（offset +{}, 4 字节）= {}",
+                            "  → Candidate NumberOfLinks field (offset +{}, 4 bytes) = {}",
                             nlinks_off, nlinks
                         );
                     }
                 } else {
-                    println!("  → 未在 header 内找到 LastWriteTime 字节序列");
+                    println!("  → LastWriteTime byte sequence not found in the header");
                 }
             }
         }
     } else {
-        println!("\n警告：class 77 buffer 中未找到任何已知文件名锚点");
+        println!("\nWarning: no known filename anchors found in the class 77 buffer");
     }
 
-    // ── 步骤 6：保存分析数据到文件，便于 verdict 文档引用 ───────────
+    // ── Step 6: save analysis data to a file for reference in the verdict document ────────
     write_verdict_supported(&buf37, &buf77, &class37_entries, &anchors);
 }
 

@@ -4,8 +4,8 @@ use jwalk_meta::*;
 use std::time::Instant;
 use util::Dir;
 
-/// CI 友好的吞吐基准：验证不同并行度的遍历能力。
-/// 不是精确基准测试，而是确保性能不退化。
+/// CI-friendly throughput benchmark: verify traversal with different parallelism levels.
+/// This is not a precise benchmark; it is intended to catch performance regressions.
 #[test]
 fn ci_serial_throughput() {
     let dir = Dir::tmp();
@@ -27,7 +27,7 @@ fn ci_serial_throughput() {
     // root + bench/ + 500 files = 502
     assert_eq!(file_count + 2, r.ents().len());
 
-    // CI 环境下 500 文件遍历应该在 10 秒内完成
+    // Traversing 500 files should finish within 10 seconds in CI.
     assert!(
         elapsed.as_secs() < 10,
         "serial traversal took {:?}, expected < 10s",
@@ -71,7 +71,7 @@ fn ci_thread_scalability() {
         dir.touch(format!("bench/f_{:04}.txt", i));
     }
 
-    // 测试不同线程数都能正确完成
+    // Verify that traversal completes correctly with different thread counts.
     for threads in [1, 2, 4, 8] {
         let wd = WalkDir::new(dir.path())
             .parallelism(Parallelism::RayonNewPool(threads))
@@ -95,7 +95,7 @@ fn ci_rayon_pool_reuse() {
     dir.mkdirp("a/b/c");
     dir.touch("a/b/c/file.txt");
 
-    // 反复使用 RayonNewPool，验证 TLS 缓存不泄漏
+    // Repeatedly use RayonNewPool to verify that the TLS cache does not leak.
     for _ in 0..20 {
         let wd = WalkDir::new(dir.path())
             .parallelism(Parallelism::RayonNewPool(2))

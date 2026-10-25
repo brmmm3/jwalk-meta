@@ -5,6 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [1.1.0] - 2026-10-25
 
+Merge several improvements from Be90nia fork. In addition some further performance improvements and fixes.
+All Chinese comments translated into English using AI.
+
 ### Added
 
 - Add native Windows directory enumeration using `NtQueryDirectoryFileEx`, with streaming subdirectory dispatch and priority-based scheduling while preserving ordered output.

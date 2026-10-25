@@ -1,41 +1,41 @@
-# class 77 (FileStatBasicInformation) 目录枚举可行性 PoC Verdict
+# class 77 (FileStatBasicInformation) Directory Enumeration Feasibility PoC Verdict
 
-> **结论**：❌ **不可行**。Windows 11 build 26200 (24H2+) 实测，class 77 (FileStatBasicInformation) **不能**用于 `NtQueryDirectoryFile` / `NtQueryDirectoryFileEx` 目录枚举，两个 API 均返回 `STATUS_INVALID_INFO_CLASS` (0xC0000003)。仅 `NtQueryInformationByName` 单文件查询支持 class 77。
+> **Conclusion**: ❌ **Not feasible**. Tests on Windows 11 build 26200 (24H2+) show that class 77 (FileStatBasicInformation) **cannot** be used for directory enumeration with `NtQueryDirectoryFile` or `NtQueryDirectoryFileEx`; both APIs return `STATUS_INVALID_INFO_CLASS` (0xC0000003). Only single-file queries using `NtQueryInformationByName` support class 77.
 
 ---
 
-## 1. 测试环境
+## 1. Test environment
 
-| 项目 | 值 |
+| Item | Value |
 |---|---|
-| 操作系统 | Windows 11 专业版 |
-| Build | 26200（满足 PoC 要求的 build 26048+） |
-| 测试目录 | `D:\Project\jwalk-meta\.`（含 20 个真实条目，覆盖短/中/长文件名） |
-| PoC 程序 | `examples/class77_poc.rs` |
-| 完整日志 | 见本机 `%TEMP%\opencode\class77_poc_final.log` |
+| Operating system | Windows 11 Pro |
+| Build | 26200 (meets the PoC requirement of build 26048+) |
+| Test directory | `D:\Project\jwalk-meta\.` (20 real entries, including short/medium/long filenames) |
+| PoC program | `examples/class77_poc.rs` |
+| Full log | See `%TEMP%\opencode\class77_poc_final.log` on the test machine |
 
-### 测试目录条目样本（class 37 解析，前 10 个）
+### Sample test-directory entries (first entries parsed from class 37)
 
-| # | offset | NextEntryOffset | 文件名 | 长度 |
+| # | offset | NextEntryOffset | Filename | Length |
 |---|---|---|---|---|
-| 0 | 224 | 120 | `.beads` | 6（短）|
-| 1 | 344 | 136 | `.editorconfig` | 13（长）|
-| 2 | 480 | 112 | `.git` | 4（短）|
-| 4 | 712 | 128 | `.gitignore` | 10（中）|
-| 5 | 840 | 112 | `.omo` | 4（短）|
-| 8 | 1200 | 128 | `Cargo.lock` | 10（中）|
+| 0 | 224 | 120 | `.beads` | 6 (short) |
+| 1 | 344 | 136 | `.editorconfig` | 13 (long) |
+| 2 | 480 | 112 | `.git` | 4 (short) |
+| 4 | 712 | 128 | `.gitignore` | 10 (medium) |
+| 5 | 840 | 112 | `.omo` | 4 (short) |
+| 8 | 1200 | 128 | `Cargo.lock` | 10 (medium) |
 
-文件名长度从 4 到 13 字符不等，覆盖变长字段处理场景。完整 20 个条目全部解析正确。
+Filename lengths range from 4 to 13 characters, covering variable-length field handling. All 20 entries were parsed correctly.
 
 ---
 
-## 2. 字段布局对比表
+## 2. Field layout comparison
 
-### 2.1 class 37 (FILE_ID_BOTH_DIR_INFO) — 当前生产代码用
+### 2.1 class 37 (FILE_ID_BOTH_DIR_INFO) — used by the current production code
 
-> 已知结构，每次 entry 总大小 = 104 字节固定头 + 变长 FileName，**不含 NumberOfLinks**。
+> Known structure. Each entry is 104 bytes of fixed header plus a variable-length FileName; it **does not contain NumberOfLinks**.
 
-| 偏移 | 大小 | 字段 | 类型 |
+| Offset | Size | Field | Type |
 |---|---|---|---|
 | 0   | 4  | NextEntryOffset | u32 |
 | 4   | 4  | FileIndex | u32 |
@@ -55,13 +55,13 @@
 | 96  | 8  | FileId | i64 |
 | 104 | N  | FileName | [u16; N/2] |
 
-**结论**：无 NumberOfLinks 字段。需要二次查询（当前 `batch_query_nlinks` 实现，N 次 syscall）。
+**Conclusion**: There is no NumberOfLinks field. A second query is required (the current `batch_query_nlinks` implementation, with N system calls).
 
-### 2.2 class 77 (FileStatBasicInformation) — 文档声明的单文件结构
+### 2.2 class 77 (FileStatBasicInformation) — documented single-file structure
 
-> Microsoft [文档](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-file_stat_basic_information) 声明结构：
+> Microsoft [documentation](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-file_stat_basic_information) declares the following structure:
 
-| 偏移 | 大小 | 字段 | 类型 |
+| Offset | Size | Field | Type |
 |---|---|---|---|
 | 0   | 8  | FileId | i64 |
 | 8   | 8  | CreationTime | i64 |
@@ -75,37 +75,37 @@
 | 64  | 4  | **NumberOfLinks** | u32 |
 | 68  | 4  | (padding) | — |
 | 72  | 8  | EffectiveAccess | i64 |
-| **合计** | **80** | | |
+| **Total** | **80** | | |
 
-### 2.3 class 77 — 实测真实结构
+### 2.3 class 77 — actual structure observed in testing
 
-PoC 用 `NtQueryInformationByName` 探测 buffer size：从 64 字节扫描到 128 字节，每步 4 字节。
+The PoC probes the buffer size using `NtQueryInformationByName`, scanning from 64 to 128 bytes in 4-byte increments.
 
-| Buffer Size | 结果 |
+| Buffer size | Result |
 |---|---|
 | 64..100 | `STATUS_INFO_LENGTH_MISMATCH` (0xC0000004) |
-| **104** | ✅ **成功**，NumberOfLinks=1 |
-| 108..128 | 未测试（已成功） |
+| **104** | ✅ **Success**, NumberOfLinks=1 |
+| 108..128 | Not tested (104 succeeded) |
 
-**意外发现**：实际结构 size 是 **104 字节**，比文档声明（80 字节）多出 24 字节。`NumberOfLinks` 字段在偏移 64 仍然正确（实测 .beads 目录 NumberOfLinks=1，FileAttributes=0x10=FILE_ATTRIBUTE_DIRECTORY，值合理）。
+**Unexpected finding**: The actual structure size is **104 bytes**, 24 bytes larger than the documented 80 bytes. The `NumberOfLinks` field at offset 64 is still correct (`NumberOfLinks=1` for the tested .beads directory, with `FileAttributes=0x10=FILE_ATTRIBUTE_DIRECTORY`, a plausible value).
 
-多出的 24 字节（偏移 80..104）是文档未公开的扩展字段。可能的用途：OwnerId / ConvergedSequenceNumber / 类似 NTFS extra info。PoC 不深究，因为目录枚举本身已被拒绝。
+The additional 24 bytes (offsets 80..104) are undocumented extension fields. Possible uses include OwnerId, ConvergedSequenceNumber, or similar NTFS extra information. The PoC does not investigate further because directory enumeration itself is rejected.
 
-### 2.4 class 77 目录枚举（推测的目录格式，未验证）
+### 2.4 class 77 directory enumeration (hypothetical directory format, unverified)
 
-如果 `NtQueryDirectoryFile` 接受 class 77，按 NT API 目录信息类的通用模式，结构会扩展为：
+If `NtQueryDirectoryFile` accepted class 77, the structure would likely be extended according to the common NT API directory-information-class pattern:
 
 ```
-NextEntryOffset(4) + FileIndex(4)? + <FILE_STAT_BASIC_INFORMATION 104 字节> + FileNameLength(4) + FileName[]
+NextEntryOffset(4) + FileIndex(4)? + <FILE_STAT_BASIC_INFORMATION 104 bytes> + FileNameLength(4) + FileName[]
 ```
 
-**但因为实测拒绝，这只是理论推测，PoC 无法验证。**
+**However, since testing rejected the class, this remains a theoretical guess that the PoC cannot verify.**
 
 ---
 
-## 3. 实测 dump 字节分析
+## 3. Analysis of bytes from the test dump
 
-### 3.1 class 37 buffer 前 1024 字节（基线）
+### 3.1 First 1024 bytes of the class 37 buffer (baseline)
 
 ```
 00000000: 70 00 00 00 00 00 00 00 bc e4 5d a7 0d ef dc 01  p.........].....
@@ -117,16 +117,16 @@ NextEntryOffset(4) + FileIndex(4)? + <FILE_STAT_BASIC_INFORMATION 104 字节> + 
 00000060: 30 17 00 00 00 00 4c 00 2e 00 00 00 00 00 00 00  0.....L.........
 ```
 
-字段验证：
-- `NextEntryOffset = 0x70 = 112` ✓（与 PoC 输出一致）
-- `FileAttributes = 0x10`（FILE_ATTRIBUTE_DIRECTORY）✓ （这是 `.` 条目）
-- `FileNameLength = 0x04`（`.` 2 字节 UTF-16 = 4 字节）✓
+Field validation:
+- `NextEntryOffset = 0x70 = 112` ✓ (matches the PoC output)
+- `FileAttributes = 0x10` (`FILE_ATTRIBUTE_DIRECTORY`) ✓ (this is the `.` entry)
+- `FileNameLength = 0x04` (`.` is 2 bytes of UTF-16 = 4 bytes) ✓
 
-class 37 buffer 完整可用，所有 20 个条目正确解析。
+The class 37 buffer is fully usable; all 20 entries were parsed correctly.
 
-### 3.2 class 77 目录枚举 — 拒绝调用，无 buffer
+### 3.2 class 77 directory enumeration — calls rejected, no buffer returned
 
-三种参数组合全部失败：
+All three parameter combinations failed:
 
 ```
 (a) ret_single=0, FileName=NULL, restart=1 → 0xC0000003
@@ -134,94 +134,94 @@ class 37 buffer 完整可用，所有 20 个条目正确解析。
 (c) ret_single=1, FileName=NULL          → 0xC0000003
 ```
 
-旧 API `NtQueryDirectoryFile`（不带 Ex）也失败：
+The older API, `NtQueryDirectoryFile` (without Ex), also failed:
 
 ```
 NtQueryDirectoryFile + class 77 → 0xC0000003
 ```
 
-**没有 buffer 可分析。**
+**There is no buffer to analyze.**
 
 ---
 
-## 4. 核心结论
+## 4. Main conclusion
 
-### ❌ class 77 不可用于目录枚举，关闭此优化方向
+### ❌ class 77 cannot be used for directory enumeration; abandon this optimization
 
-**证据链**（在 Windows 11 build 26200 上实测）：
+**Evidence** (tested on Windows 11 build 26200):
 
-1. **NtQueryDirectoryFileEx + class 77**：3 种参数组合（FileName=NULL/"*"、ReturnSingleEntry=0/1）全部 `STATUS_INVALID_INFO_CLASS` (0xC0000003)
-2. **NtQueryDirectoryFile（不带 Ex）+ class 77**：同样 `STATUS_INVALID_INFO_CLASS`
-3. **NtQueryInformationByName + class 77 单文件查询**：✅ 成功（buffer size=104，NumberOfLinks=1，FileAttributes=0x10）
+1. **NtQueryDirectoryFileEx + class 77**: All three parameter combinations (FileName=NULL/"*", ReturnSingleEntry=0/1) returned `STATUS_INVALID_INFO_CLASS` (0xC0000003).
+2. **NtQueryDirectoryFile (without Ex) + class 77**: Also returned `STATUS_INVALID_INFO_CLASS`.
+3. **NtQueryInformationByName + class 77 single-file query**: ✅ Succeeded (buffer size=104, NumberOfLinks=1, FileAttributes=0x10).
 
-**关键判据**：单文件查询成功，证明系统认识 class 77、内核已实现该 info class；但目录枚举用 class 77 被显式拒绝。这不是「Windows 版本过旧」或「参数错误」，而是 **NTFS/FAT/ReFS 驱动的目录枚举代码路径不接受 class 77**。
+**Key criterion**: The successful single-file query proves the system recognizes class 77 and the kernel implements this information class. However, class 77 is explicitly rejected for directory enumeration. This is not due to an "outdated Windows version" or "invalid parameters"; rather, **the directory-enumeration code paths in the NTFS/FAT/ReFS drivers do not accept class 77**.
 
-### 与 beads 记忆对比
+### Comparison with the beads note
 
-- beads `filestatbasicinformation-class77-dir-enum` 记录："class 77 确实支持 NtQueryDirectoryFile 目录枚举（Microsoft 官方文档确认）"
-- 实测结论：**Microsoft 文档与实际实现不符**。文档 [FILE_STAT_BASIC_INFORMATION](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-file_stat_basic_information) 页面说"可用于 NtQueryInformationFile / NtQueryDirectoryFile"，但 build 26200 实测拒绝。
-- 可能原因：
-  - 文档描述的是"未来版本"或"特定 SKU"
-  - 内核 I/O 管理器的目录枚举 fast path 显式过滤了 class 77
-  - 需要特定的 VolumeFlags 或 FSCTL 先开启（PoC 未探测）
+- The beads note `filestatbasicinformation-class77-dir-enum` says: "Class 77 does support NtQueryDirectoryFile directory enumeration (confirmed by Microsoft official documentation)."
+- Test result: **Microsoft's documentation does not match the actual implementation**. The [FILE_STAT_BASIC_INFORMATION](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-file_stat_basic_information) page says it "can be used with NtQueryInformationFile / NtQueryDirectoryFile," but testing on build 26200 shows it is rejected.
+- Possible reasons:
+  - The documentation describes a "future version" or a "specific SKU."
+  - The directory-enumeration fast path in the kernel I/O manager explicitly filters out class 77.
+  - A specific VolumeFlags setting or FSCTL may need to be enabled first (not tested by the PoC).
 
-### LinkCount 字段存在性
+### Whether the LinkCount field exists
 
-由于目录枚举被拒，**无法验证"目录枚举期间是否能一次性返回 LinkCount"**。但单文件 class 77 查询确认返回 NumberOfLinks（偏移 64，4 字节，.beads 实测=1）。
+Because directory enumeration is rejected, **it is impossible to verify whether LinkCount can be returned in a single directory-enumeration call**. However, the single-file class 77 query confirms that it returns NumberOfLinks (offset 64, 4 bytes; observed value for .beads was 1).
 
-### parse_buffer_entries 重写方案
+### parse_buffer_entries rewrite proposal
 
-**不适用**——class 77 目录枚举不可用，无需重写 `parse_buffer_entries`。当前 `batch_query_nlinks`（NtQueryInformationByName class 68 单线程串行）仍是该问题在 Windows 上的最佳实现。
+**Not applicable** — class 77 directory enumeration is unavailable, so `parse_buffer_entries` does not need to be rewritten. The current `batch_query_nlinks` implementation (single-threaded, sequential `NtQueryInformationByName` class 68 calls) remains the best Windows implementation for this problem.
 
 ---
 
-## 5. 后续建议
+## 5. Recommendations
 
-| 方向 | 可行性 | 备注 |
+| Option | Feasibility | Notes |
 |---|---|---|
-| **当前实现保持不变** | ✅ 推荐 | `batch_query_nlinks` + class 68 单线程是已知最优解（NTFS MFT 卷锁限制） |
-| 探测其他目录枚举 info class | 🟡 中 | 已知 class 3/12/13/14/34/37/38 都不含 NumberOfLinks；可枚举尝试未知 class 号 |
-| 改用 SMB/CIFS 协议层优化 | 🟢 仅网络场景 | 仅对 SMB 远程目录有效，本地 NTFS 无收益 |
-| IoRing / NtCreateUserProcess 等 | ❌ 见 beads `ntfs-mft-lock-kills-local-io-uring` | 本地 NTFS MFT 锁让并发查询无加速 |
-| 内核驱动 hook | ❌ 越界 | 需要驱动签名，超出 jwalk-meta 范围 |
+| **Keep the current implementation** | ✅ Recommended | `batch_query_nlinks` + single-threaded class 68 is the best known solution (limited by the NTFS MFT volume lock). |
+| Probe other directory-enumeration information classes | 🟡 Medium | Known classes 3/12/13/14/34/37/38 do not contain NumberOfLinks; unknown class numbers could be probed systematically. |
+| Optimize at the SMB/CIFS protocol layer | 🟢 Network scenarios only | Only useful for remote SMB directories; no benefit for local NTFS. |
+| IoRing / NtCreateUserProcess, etc. | ❌ See beads `ntfs-mft-lock-kills-local-io-uring` | The local NTFS MFT lock prevents concurrent queries from improving performance. |
+| Kernel-driver hook | ❌ Out of scope | Requires a signed driver and is beyond the scope of jwalk-meta. |
 
 ---
 
-## 6. PoC 程序交付物
+## 6. PoC deliverables
 
-**路径**：`examples/class77_poc.rs`
+**Path**: `examples/class77_poc.rs`
 
-**特性**：
-- 零新依赖（仅用现有 winapi）
-- 不修改任何 src/ 生产代码
-- 动态加载 ntdll 的 `NtQueryDirectoryFileEx` / `NtQueryDirectoryFile` / `NtQueryInformationByName`
-- 三层验证：目录枚举多参数组合 + 旧 API + 单文件健康检查
-- buffer size 扫描探测（发现真实 size=104，而非文档 80）
-- 优雅处理"系统不支持"场景，给出明确诊断
-- dump class 37 buffer 前 1024 字节作为基线对照
+**Features**:
+- No new dependencies (uses the existing winapi dependency only).
+- Does not modify any production code under `src/`.
+- Dynamically loads `NtQueryDirectoryFileEx`, `NtQueryDirectoryFile`, and `NtQueryInformationByName` from ntdll.
+- Three layers of validation: multiple directory-enumeration parameter combinations, the legacy API, and a single-file health check.
+- Scans buffer sizes (finds the actual size of 104, rather than the documented 80).
+- Gracefully handles unsupported-system scenarios and provides clear diagnostics.
+- Dumps the first 1024 bytes of the class 37 buffer as a baseline for comparison.
 
-**运行方式**：
+**How to run**:
 
 ```powershell
 cargo build --example class77_poc
-.\target\debug\examples\class77_poc.exe .           # 测当前目录
-.\target\debug\examples\class77_poc.exe D:\some_dir # 测指定目录
+.\target\debug\examples\class77_poc.exe .           # Test the current directory
+.\target\debug\examples\class77_poc.exe D:\some_dir # Test the specified directory
 ```
 
-**预期输出**（build 26048+ 的 Windows）：
+**Expected output** (Windows build 26048+):
 
 ```
-=== class 77 多参数组合测试 ===
-  (a) ret_single=0, FileName=NULL → 失败：0xC0000003
-  (b) ret_single=0, FileName=*    → 失败：0xC0000003
-  (c) ret_single=1, FileName=NULL → 失败：0xC0000003
-=== NtQueryDirectoryFile（不带 Ex）+ class 77 ===
-  NtQueryDirectoryFile + class 77 失败：0xC0000003
-=== 健康检查：单文件 class 77 ===
+=== class 77 parameter-combination tests ===
+  (a) ret_single=0, FileName=NULL → failed: 0xC0000003
+  (b) ret_single=0, FileName=*    → failed: 0xC0000003
+  (c) ret_single=1, FileName=NULL → failed: 0xC0000003
+=== NtQueryDirectoryFile (without Ex) + class 77 ===
+  NtQueryDirectoryFile + class 77 failed: 0xC0000003
+=== Single-file class 77 health check ===
   size 100 → 0xC0000004
-  size 104 → 成功 ✓
-  成功：".beads" NumberOfLinks=1 FileAttributes=0x10 (buffer size 104)
-=== class 77 目录枚举全面失败 ===
-但单文件查询成功——说明系统认识 class 77，但 NtQueryDirectoryFileEx 拒绝用于目录枚举。
-结论：class 77 不可用于目录枚举，优化方向关闭。
+  size 104 → success ✓
+  Success: ".beads" NumberOfLinks=1 FileAttributes=0x10 (buffer size 104)
+=== All class 77 directory-enumeration attempts failed ===
+The single-file query succeeded, so the system recognizes class 77, but NtQueryDirectoryFileEx rejects it for directory enumeration.
+Conclusion: class 77 cannot be used for directory enumeration; abandon this optimization.
 ```

@@ -1,11 +1,11 @@
-//! 文件系统类型检测与 I/O 策略派发（Linux-only）。
+//! Linux-only filesystem type detection and I/O strategy dispatch.
 //!
-//! 用 `statfs(2)` 检测路径所在文件系统的 `f_type`，决定是否启用 io_uring 批量 STATX。
-//! 仅对**高延迟**网络挂载（SMB/NFS/CIFS）启用 io_uring；低延迟网络挂载和本地文件系统
-//! 走串行 fstatat（io_uring 在低延迟场景有额外开销，反而更慢）。
+//! Use `statfs(2)` to inspect the filesystem `f_type` and decide whether to use batched STATX via io_uring.
+//! Enable io_uring only for **high-latency** network mounts (SMB/NFS/CIFS); low-latency network mounts
+//! and local filesystems use serial fstatat (io_uring's extra overhead can make it slower at low latency).
 //!
-//! 延迟探测：首次遇到网络 FS 时做一次 `fstatat` 计时，≥ 1ms 走 io_uring，< 1ms 走 LocalSync。
-//! 缓存策略：per-worker `HashMap<st_dev, IoStrategy>`。同一 `st_dev` 只探测一次。
+//! Latency probe: time one `fstatat` on the first network filesystem; use io_uring at >= 1 ms, otherwise LocalSync.
+//! Cache policy: a per-worker `HashMap<st_dev, IoStrategy>`. Probe each `st_dev` only once.
 
 #![cfg(target_os = "linux")]
 
@@ -16,7 +16,7 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
 use std::path::Path;
 
-// ── f_type 常量（来自 linux/magic.h，避免依赖 libc 是否导出这些常量）──────────
+// ── f_type constants (from linux/magic.h; do not depend on libc exporting them) ──────────
 
 /// SMB_SUPER_MAGIC — Linux SMB1 client mount
 const SMB_SUPER_MAGIC: i64 = 0x517B;
@@ -24,40 +24,40 @@ const SMB_SUPER_MAGIC: i64 = 0x517B;
 const NFS_SUPER_MAGIC: i64 = 0x6969;
 /// CIFS_MAGIC_NUMBER — Linux CIFS/SMB1 client mount
 const CIFS_MAGIC_NUMBER: i64 = 0xFF534D42;
-/// SMB2_SUPER_MAGIC — Linux SMB2/SMB3 client mount（vers=2.0/2.1/3.0/3.1.1）
+/// SMB2_SUPER_MAGIC — Linux SMB2/SMB3 client mount (vers=2.0/2.1/3.0/3.1.1).
 const SMB2_SUPER_MAGIC: i64 = 0xFE534D42;
-/// EXT4_SUPER_MAGIC（也为 ext2/ext3）
+/// EXT4_SUPER_MAGIC (also used by ext2/ext3).
 const EXT4_SUPER_MAGIC: i64 = 0xEF53;
 /// XFS_SUPER_MAGIC
 const XFS_SUPER_MAGIC: i64 = 0x58465342;
 /// BTRFS_SUPER_MAGIC
 const BTRFS_SUPER_MAGIC: i64 = 0x9123683E;
-/// TMPFS_MAGIC — /tmp、容器 overlay 上层常用
+/// TMPFS_MAGIC — commonly used for /tmp and container overlay upper layers.
 const TMPFS_MAGIC: i64 = 0x01021994;
-/// OVERLAYFS_SUPER_MAGIC — 容器场景
+/// OVERLAYFS_SUPER_MAGIC — container environments.
 const OVERLAYFS_SUPER_MAGIC: i64 = 0x794C7630;
 /// MSDOS_SUPER_MAGIC — FAT12/16/32
 const MSDOS_SUPER_MAGIC: i64 = 0x4D44;
 /// EXFAT_SUPER_MAGIC
 const EXFAT_SUPER_MAGIC: i64 = 0x2011BAB0;
 
-/// 目录元数据获取策略。
+/// Directory metadata retrieval strategy.
 ///
-/// 选择标准：网络挂载走 io_uring 批量 STATX（节省 N 次 RTT）；本地 FS 走串行 fstatat
-///（MFT/inode 缓存命中后无收益，且 NTFS MFT 锁让并发变慢——见历史回档 5367f20）。
+/// Selection criteria: network mounts use batched STATX via io_uring (saving N round trips); local filesystems use serial fstatat
+/// (there is no benefit after an MFT/inode cache hit, and the NTFS MFT lock makes concurrency slower; see rollback 5367f20).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IoStrategy {
-    /// 串行 per-entry `fstatat`。适用于本地 FS 和低延迟网络挂载。
+    /// Serial per-entry `fstatat`. Suitable for local filesystems and low-latency network mounts.
     LocalSync,
-    /// io_uring 批量 STATX。适用于高延迟网络挂载（单次 submit_and_wait 收割 N 个 CQE）。
+    /// Batched STATX via io_uring. Suitable for high-latency network mounts (reap N CQEs with one submit_and_wait).
     NetworkAsync,
-    /// FAT 系列（FAT32/exFAT）：不支持硬链接，`st_nlink` 恒为 1，跳过查询。
+    /// FAT family (FAT32/exFAT): hard links are unsupported, `st_nlink` is always 1, so skip the query.
     SkipNlinks,
 }
 
-/// Per-worker I/O 策略缓存。Keyed by `st_dev`（来自 `stat(2)`）。
+/// Per-worker I/O strategy cache, keyed by `st_dev` (from `stat(2)`).
 ///
-/// rayon 线程池中每个 worker 持有独立缓存，避免锁竞争。同一设备只 statfs 一次。
+/// Each Rayon worker has its own cache to avoid lock contention. Call statfs only once per device.
 #[derive(Debug, Default)]
 pub struct IoStrategyCache {
     map: HashMap<u64, IoStrategy>,
@@ -68,13 +68,13 @@ impl IoStrategyCache {
         Self::default()
     }
 
-    /// 已缓存的设备直接返回（测试用）。
+    /// Return the strategy for a cached device (test helper).
     #[cfg(test)]
     pub fn get(&self, dev: u64) -> Option<IoStrategy> {
         self.map.get(&dev).copied()
     }
 
-    /// 插入缓存（测试用）。
+    /// Insert an entry into the cache (test helper).
     #[cfg(test)]
     pub fn insert(&mut self, dev: u64, strategy: IoStrategy) {
         self.map.insert(dev, strategy);
@@ -117,13 +117,13 @@ impl IoStrategyCache {
     }
 }
 
-/// 用 `stat(2)` 取 `st_dev`。
+/// Get `st_dev` using `stat(2)`.
 #[cfg(test)]
 fn stat_dev(path: &Path) -> io::Result<u64> {
     let cstr = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL byte"))?;
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    // SAFETY: cstr NUL 终止；st 已 zeroed。
+    // SAFETY: cstr is NUL-terminated; st has been zeroed.
     let rc = unsafe { libc::stat(cstr.as_ptr(), &mut st) };
     if rc < 0 {
         Err(io::Error::last_os_error())
@@ -132,14 +132,14 @@ fn stat_dev(path: &Path) -> io::Result<u64> {
     }
 }
 
-/// 用 `statfs(2)` 取 `f_type` 并映射到 `IoStrategy`。
+/// Get `f_type` with `statfs(2)` and map it to an `IoStrategy`.
 ///
-/// 网络 FS 会额外做一次延迟探测：对路径做 `fstatat` 计时，
-/// ≥ `LATENCY_THRESHOLD` 走 `NetworkAsync`，否则降级为 `LocalSync`。
+/// Network filesystems get an additional latency probe: time `fstatat` on the path,
+/// use `NetworkAsync` at or above `LATENCY_THRESHOLD`, and otherwise fall back to `LocalSync`.
 fn statfs_strategy(path: &Path) -> Option<IoStrategy> {
     let cstr = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut sfs: libc::statfs = unsafe { std::mem::zeroed() };
-    // SAFETY: cstr NUL 终止；sfs 已 zeroed。
+    // SAFETY: cstr is NUL-terminated; sfs has been zeroed.
     let rc = unsafe { libc::statfs(cstr.as_ptr(), &mut sfs) };
     if rc < 0 {
         return None;
@@ -148,40 +148,40 @@ fn statfs_strategy(path: &Path) -> Option<IoStrategy> {
     if preliminary != IoStrategy::NetworkAsync {
         return Some(preliminary);
     }
-    // 网络 FS → 探测延迟决定是否启用 io_uring
+    // Network filesystem: use the latency probe to decide whether to enable io_uring.
     Some(probe_latency(path))
 }
 
-/// 由 `f_type` 推断策略（不含延迟探测）。
+/// Infer a strategy from `f_type` (without the latency probe).
 fn strategy_from_ftype(f_type: i64) -> IoStrategy {
     match f_type {
-        // 网络 FS → 候选 io_uring（最终由延迟探测决定）
+        // Network filesystem: candidate for io_uring (final decision is made by the latency probe).
         SMB_SUPER_MAGIC | NFS_SUPER_MAGIC | CIFS_MAGIC_NUMBER | SMB2_SUPER_MAGIC => IoStrategy::NetworkAsync,
-        // FAT 系列 → 跳过 nlink 查询（nlink 恒为 1）
+        // FAT family: skip the nlink query (nlink is always 1).
         MSDOS_SUPER_MAGIC | EXFAT_SUPER_MAGIC => IoStrategy::SkipNlinks,
-        // 本地 FS → 串行 fstatat
+        // Local filesystem: serial fstatat.
         EXT4_SUPER_MAGIC
         | XFS_SUPER_MAGIC
         | BTRFS_SUPER_MAGIC
         | TMPFS_MAGIC
         | OVERLAYFS_SUPER_MAGIC => IoStrategy::LocalSync,
-        // 未知 FS → 保守 LocalSync
+        // Unknown filesystem: conservatively use LocalSync.
         _ => IoStrategy::LocalSync,
     }
 }
 
-/// 延迟探测阈值：单次 fstatat ≥ 1ms 视为高延迟网络。
+/// Latency probe threshold: a single fstatat taking >= 1 ms is considered a high-latency network mount.
 ///
-/// io_uring 的优势来自流水线化 N 个请求的等待时间：
-/// - RTT ≈ 0.1ms（loopback）：串行 N×0.1ms ≈ io_uring 1×0.1ms，差距可忽略，io_uring 额外开销反而更慢
-/// - RTT ≈ 5ms（真实 SMB）：串行 N×5ms >> io_uring 1×5ms，收益显著
-///   1ms 是经验分界线：低于此阈值 io_uring 无收益。
+/// io_uring's advantage comes from pipelining the wait time for N requests:
+/// - RTT ~= 0.1 ms (loopback): serial N*0.1 ms ~= io_uring 1*0.1 ms; the difference is negligible, and io_uring overhead can make it slower.
+/// - RTT ~= 5 ms (real SMB): serial N*5 ms >> io_uring 1*5 ms, yielding a significant benefit.
+///   1 ms is an empirical cutoff; below it, io_uring provides no benefit.
 const LATENCY_THRESHOLD: std::time::Duration = std::time::Duration::from_micros(1000);
 
-/// 对网络挂载路径做一次 fstatat 探测延迟。
+/// Probe latency on a network mount by timing one fstatat.
 ///
-/// 高延迟（≥ LATENCY_THRESHOLD）→ NetworkAsync（io_uring 有收益）
-/// 低延迟（< LATENCY_THRESHOLD）→ LocalSync（io_uring 反而更慢）
+/// High latency (>= LATENCY_THRESHOLD) -> NetworkAsync (io_uring is beneficial).
+/// Low latency (< LATENCY_THRESHOLD) -> LocalSync (io_uring would be slower).
 fn probe_latency(path: &Path) -> IoStrategy {
     let cstr = match std::ffi::CString::new(path.as_os_str().as_bytes()) {
         Ok(c) => c,
@@ -189,7 +189,7 @@ fn probe_latency(path: &Path) -> IoStrategy {
     };
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     let start = std::time::Instant::now();
-    // SAFETY: cstr NUL 终止；st 已 zeroed；AT_SYMLINK_NOFOLLOW = 0x100。
+    // SAFETY: cstr is NUL-terminated; st has been zeroed; AT_SYMLINK_NOFOLLOW = 0x100.
     let rc = unsafe {
         libc::fstatat(
             -1i32 as libc::c_int, // AT_FDCWD
@@ -200,7 +200,7 @@ fn probe_latency(path: &Path) -> IoStrategy {
     };
     let elapsed = start.elapsed();
     if rc < 0 {
-        // fstatat 失败（路径不存在等）→ 保守 LocalSync
+        // fstatat failed (e.g. path does not exist): conservatively use LocalSync.
         return IoStrategy::LocalSync;
     }
     if elapsed >= LATENCY_THRESHOLD {
@@ -214,8 +214,8 @@ fn probe_latency(path: &Path) -> IoStrategy {
 mod tests {
     use super::*;
 
-    /// `strategy_from_ftype` 只返回候选策略（不含延迟探测），网络 FS 返回 NetworkAsync。
-    /// 最终策略由 `statfs_strategy` 中的延迟探测决定。
+    /// `strategy_from_ftype` returns only a candidate strategy (without latency probing); network filesystems return NetworkAsync.
+    /// The final strategy is determined by the latency probe in `statfs_strategy`.
     #[test]
     fn test_strategy_from_ftype_known_network() {
         assert_eq!(strategy_from_ftype(NFS_SUPER_MAGIC), IoStrategy::NetworkAsync);
@@ -249,20 +249,20 @@ mod tests {
 
     #[test]
     fn test_strategy_from_ftype_unknown_conservative_local() {
-        // 未知 FS 号（不在 magic.h 中）
+        // Unknown filesystem magic (not listed in magic.h).
         assert_eq!(strategy_from_ftype(0x12345678), IoStrategy::LocalSync);
         assert_eq!(strategy_from_ftype(0), IoStrategy::LocalSync);
         assert_eq!(strategy_from_ftype(-1), IoStrategy::LocalSync);
     }
 
-    /// CI 上 /tmp 通常为 ext4 或 tmpfs/overlay → LocalSync。
-    /// 此测试覆盖 stat_dev/statfs_strategy 真实 syscall 路径。
+    /// On CI, /tmp is usually ext4 or tmpfs/overlay, so it should use LocalSync.
+    /// This test covers the real syscall paths in stat_dev/statfs_strategy.
     #[test]
     fn test_detect_tmpdir_returns_local_sync() {
         let tmp = std::env::temp_dir();
         let mut cache = IoStrategyCache::new();
         let strategy = cache.detect(&tmp);
-        // CI 上不会是 NetworkAsync（除非人为挂载 SMB，本测试不假设）
+        // CI should not return NetworkAsync unless SMB was mounted manually; this test makes no such assumption.
         assert_ne!(
             strategy,
             IoStrategy::NetworkAsync,
@@ -270,14 +270,14 @@ mod tests {
         );
     }
 
-    /// 同目录第二次 detect 应命中缓存（不重复 statfs）。
-    /// 验证方式：cache.get(st_dev) 应返回与 detect 相同的结果。
+    /// A second detect on the same directory should hit the cache (no repeated statfs call).
+    /// Verify that cache.get(st_dev) returns the same result as detect.
     #[test]
     fn test_detect_caches_by_st_dev() {
         let tmp = std::env::temp_dir();
         let mut cache = IoStrategyCache::new();
         let s1 = cache.detect(&tmp);
-        // 同目录下创建子目录，st_dev 相同 → 缓存命中
+        // A subdirectory on the same filesystem has the same st_dev, so this should hit the cache.
         let dev = stat_dev(&tmp).unwrap();
         assert_eq!(cache.get(dev), Some(s1));
         let s2 = cache.detect(&tmp);
@@ -300,7 +300,7 @@ mod tests {
         );
     }
 
-    /// 不存在路径 → 保守 LocalSync（不 panic）。
+    /// A nonexistent path falls back to LocalSync without panicking.
     #[test]
     fn test_detect_nonexistent_path_falls_back() {
         let mut cache = IoStrategyCache::new();
@@ -308,21 +308,21 @@ mod tests {
         assert_eq!(strategy, IoStrategy::LocalSync);
     }
 
-    /// NUL 字节路径 → 保守 LocalSync（不 panic）。
+    /// A path containing a NUL byte falls back to LocalSync without panicking.
     #[test]
     fn test_detect_path_with_nul_byte_falls_back() {
         let mut cache = IoStrategyCache::new();
-        // CString::new 会拒绝内嵌 NUL
+        // CString::new rejects embedded NUL bytes.
         let path = Path::new("/tmp/foo\0bar");
         let strategy = cache.detect(path);
         assert_eq!(strategy, IoStrategy::LocalSync);
     }
 
-    /// probe_latency 对本地路径应返回 LocalSync（延迟 < 1ms）。
+    /// probe_latency should return LocalSync for a local path (latency < 1 ms).
     #[test]
     fn test_probe_latency_local_returns_local_sync() {
         let tmp = std::env::temp_dir();
-        // 本地路径延迟应远低于 1ms
+        // Local path latency should be far below 1 ms.
         assert_eq!(probe_latency(&tmp), IoStrategy::LocalSync);
     }
 }

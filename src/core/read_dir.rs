@@ -6,7 +6,7 @@ use crate::Result;
 pub struct ReadDir<C: ClientState> {
     pub(crate) read_dir_state: C::ReadDirState,
     pub(crate) results_list: Vec<Result<DirEntry<C>>>,
-    /// 流式分发期间已提前调度的子目录数量。
+    /// Number of subdirectories scheduled early during streaming dispatch.
     pub(crate) streamed_child_count: usize,
 }
 
@@ -30,9 +30,9 @@ impl<C: ClientState> ReadDir<C> {
         })
     }
 
-    /// 单遍遍历：直接生成 Weighted<ReadDirSpec>，跳过已流式调度的子目录。
-    /// 优先淹没算法：weight = parent_weight + pipe_size（父目录总条目数），
-    /// 权重继承确保大管道的分支也获得高优先级。
+    /// Single-pass traversal: generate Weighted<ReadDirSpec> directly, skipping subdirectories already scheduled during streaming.
+    /// Priority-flooding algorithm: weight = parent_weight + pipe_size (the total number of entries in the parent directory).
+    /// Inheriting the weight ensures that branches of large pipelines also get higher priority.
     pub fn weighted_children_specs(
         &self,
         index_path: &IndexPath,
@@ -42,9 +42,9 @@ impl<C: ClientState> ReadDir<C> {
         let pipe_size = self.results_list.len();
         let weight = parent_weight.saturating_add(pipe_size);
 
-        // 单遍遍历：跳过已流式部分，直接构造 Weighted<ReadDirSpec>
-        // 使用 subdir_counter 仅对产生 spec 的子目录递增，
-        // 确保 IndexPath 序列连续（0,1,2,...），而非按 enumerate 索引产生空洞。
+        // Single-pass traversal: skip the portion already streamed and construct Weighted<ReadDirSpec> directly.
+        // Increment subdir_counter only for subdirectories that produce a spec,
+        // ensuring a contiguous IndexPath sequence (0,1,2,...) instead of gaps from enumerate indices.
         let mut specs = Vec::with_capacity(pipe_size.saturating_sub(skip));
         let mut subdir_counter = 0usize;
         for entry_result in self.results_list.iter() {
