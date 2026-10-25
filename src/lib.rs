@@ -879,14 +879,15 @@ mod read_dir_windows_helpers {
     pub(super) fn make_metadata(info: &DirEntryInfo) -> MetaData {
         let is_dir = (info.file_attributes & win32_attrs::FILE_ATTRIBUTE_DIRECTORY) != 0;
         let is_symlink = (info.file_attributes & win32_attrs::FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        // Windows creation_time is both birth time and (Python-mirrored) st_ctime.
+        let created = filetime_to_systemtime(info.creation_time);
         MetaData {
             is_dir,
             is_file: !is_dir && !is_symlink,
             is_symlink,
             size: info.file_size,
-            // Windows creation_time is both birth time and (Python-mirrored) st_ctime.
-            created: filetime_to_systemtime(info.creation_time),
-            changed: filetime_to_systemtime(info.creation_time),
+            created,
+            changed: created,
             modified: filetime_to_systemtime(info.last_write_time),
             accessed: filetime_to_systemtime(info.last_access_time),
             permissions: None, // The NT fast path does not retrieve permission information.

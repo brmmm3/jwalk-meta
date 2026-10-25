@@ -26,7 +26,7 @@ impl<C: ClientState> ReadDir<C> {
         self.results_list.iter().filter_map(move |each| {
             each.as_ref()
                 .ok()?
-                .read_children_spec(self.read_dir_state.clone())
+                .read_children_spec(&self.read_dir_state)
         })
     }
 
@@ -51,7 +51,7 @@ impl<C: ClientState> ReadDir<C> {
             if let Some(spec) = entry_result
                 .as_ref()
                 .ok()
-                .and_then(|e| e.read_children_spec(self.read_dir_state.clone()))
+                .and_then(|e| e.read_children_spec(&self.read_dir_state))
             {
                 if subdir_counter >= skip {
                     specs.push(Weighted::new(

@@ -277,13 +277,13 @@ impl<C: ClientState> DirEntry<C> {
 
     pub(crate) fn read_children_spec(
         &self,
-        client_read_state: C::ReadDirState,
+        client_read_state: &C::ReadDirState,
     ) -> Option<ReadDirSpec<C>> {
         self.read_children_path
             .as_ref()
             .map(|read_children_path| ReadDirSpec {
                 depth: self.depth,
-                client_read_state,
+                client_read_state: client_read_state.clone(),
                 path: read_children_path.clone(),
                 follow_link_ancestors: self.follow_link_ancestors.clone(),
             })

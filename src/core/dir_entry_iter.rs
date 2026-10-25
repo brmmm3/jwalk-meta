@@ -44,7 +44,7 @@ impl<C: ClientState> DirEntryIter<C> {
                 dir_entry_result
                     .as_ref()
                     .ok()?
-                    .read_children_spec(root_read_dir_state.clone())
+                    .read_children_spec(&root_read_dir_state)
             })
             .collect();
 
