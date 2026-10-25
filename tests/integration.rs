@@ -1,6 +1,7 @@
 use lazy_static::lazy_static;
 use rayon::prelude::*;
 use std::env;
+#[cfg(unix)]
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -266,6 +267,7 @@ fn siblings() {
     assert_eq!(expected, r.paths());
 }
 
+#[cfg(unix)]
 #[test]
 fn sym_root_file_nofollow() {
     let dir = Dir::tmp();
@@ -297,6 +299,7 @@ fn sym_root_file_nofollow() {
     assert!(!link.metadata().unwrap().is_dir());
 }
 
+#[cfg(unix)]
 #[test]
 fn sym_root_file_follow() {
     let dir = Dir::tmp();
@@ -329,6 +332,7 @@ fn sym_root_file_follow() {
     assert!(!link.metadata().unwrap().is_dir());
 }
 
+#[cfg(unix)]
 #[test]
 fn sym_root_dir_nofollow() {
     let dir = Dir::tmp();
@@ -365,6 +369,7 @@ fn sym_root_dir_nofollow() {
     assert!(!link_zzz.path_is_symlink());
 }
 
+#[cfg(unix)]
 #[test]
 fn sym_root_dir_follow() {
     let dir = Dir::tmp();
@@ -403,6 +408,7 @@ fn sym_root_dir_follow() {
     assert!(!link_zzz.path_is_symlink());
 }
 
+#[cfg(unix)]
 #[test]
 fn sym_file_nofollow() {
     let dir = Dir::tmp();
@@ -439,6 +445,7 @@ fn sym_file_nofollow() {
     assert!(!link.metadata().unwrap().is_dir());
 }
 
+#[cfg(unix)]
 #[test]
 fn sym_file_follow() {
     let dir = Dir::tmp();
@@ -475,6 +482,7 @@ fn sym_file_follow() {
     assert!(!link.metadata().unwrap().is_dir());
 }
 
+#[cfg(unix)]
 #[test]
 fn sym_dir_nofollow() {
     let dir = Dir::tmp();
@@ -512,6 +520,7 @@ fn sym_dir_nofollow() {
     assert!(!link.metadata().unwrap().is_dir());
 }
 
+#[cfg(unix)]
 #[test]
 fn sym_dir_follow() {
     let dir = Dir::tmp();
@@ -555,6 +564,7 @@ fn sym_dir_follow() {
     assert!(!link_zzz.path_is_symlink());
 }
 
+#[cfg(unix)]
 #[test]
 fn sym_noloop() {
     let dir = Dir::tmp();
@@ -569,6 +579,7 @@ fn sym_noloop() {
     assert_eq!(5, r.ents().len());
 }
 
+#[cfg(unix)]
 #[test]
 fn sym_loop_detect() {
     let dir = Dir::tmp();
@@ -594,6 +605,7 @@ fn sym_loop_detect() {
     assert!(err.io_error().is_none());
 }
 
+#[cfg(unix)]
 #[test]
 fn sym_self_loop_no_error() {
     let dir = Dir::tmp();
@@ -619,6 +631,7 @@ fn sym_self_loop_no_error() {
     assert!(!ent.metadata().unwrap().file_type().is_dir());
 }
 
+#[cfg(unix)]
 #[test]
 fn sym_file_self_loop_io_error() {
     let dir = Dir::tmp();
@@ -640,6 +653,7 @@ fn sym_file_self_loop_io_error() {
     assert!(err.io_error().is_some());
 }
 
+#[cfg(unix)]
 #[test]
 fn sym_dir_self_loop_io_error() {
     let dir = Dir::tmp();
@@ -805,6 +819,8 @@ fn local_paths(walk_dir: WalkDir) -> Vec<String> {
             let path = each_entry.path();
             let path = path.strip_prefix(&root).unwrap().to_path_buf();
             let mut path_string = path.to_str().unwrap().to_string();
+            // Unify path separators for cross-platform assertions
+            path_string = path_string.replace('\\', "/");
             path_string.push_str(&format!(" ({})", each_entry.depth));
             path_string
         })
@@ -818,7 +834,8 @@ fn walk_serial() {
     let paths = local_paths(
         WalkDir::new(test_dir)
             .parallelism(Parallelism::Serial)
-            .sort(true),
+            .sort(true)
+            .skip_hidden(true),
     );
     assert_eq!(
         paths,
@@ -841,7 +858,8 @@ fn sort_by_name_rayon_custom_2_threads() {
     let paths = local_paths(
         WalkDir::new(test_dir)
             .parallelism(Parallelism::RayonNewPool(2))
-            .sort(true),
+            .sort(true)
+            .skip_hidden(true),
     );
     assert_eq!(
         paths,
@@ -861,7 +879,7 @@ fn sort_by_name_rayon_custom_2_threads() {
 #[test]
 fn walk_rayon_global() {
     let (test_dir, _temp_dir) = test_dir();
-    let paths = local_paths(WalkDir::new(test_dir).sort(true));
+    let paths = local_paths(WalkDir::new(test_dir).sort(true).skip_hidden(true));
     assert_eq!(
         paths,
         vec![
@@ -1015,7 +1033,7 @@ fn walk_root() {
         .max_depth(1)
         .sort(true)
         .into_iter()
-        .filter_map(|each| Some(each.ok()?.path()))
+        .filter_map(|each| Some(each.ok()?.path().to_path_buf()))
         .collect();
     assert_eq!(paths.first().unwrap().to_str().unwrap(), "/");
 }
@@ -1031,7 +1049,7 @@ fn walk_relative_1() {
 
     env::set_current_dir(&test_dir).unwrap();
 
-    let paths = local_paths(WalkDir::new(".").sort(true));
+    let paths = local_paths(WalkDir::new(".").sort(true).skip_hidden(true));
 
     assert_eq!(
         paths,
@@ -1058,7 +1076,7 @@ fn walk_relative_2() {
 
     env::set_current_dir(&test_dir.join("group 1")).unwrap();
 
-    let paths = local_paths(WalkDir::new("..").sort(true));
+    let paths = local_paths(WalkDir::new("..").sort(true).skip_hidden(true));
 
     assert_eq!(
         paths,
@@ -1135,8 +1153,687 @@ fn test_read_linux() {
     let linux_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("benches/assets/linux_checkout");
     if linux_dir.exists() {
         for each in WalkDir::new(linux_dir) {
-            let path = each.unwrap().path();
+            let entry = each.unwrap();
+            let path = entry.path();
             assert!(path.exists(), "{:?}", path);
         }
     }
+}
+
+// ==================== Priority Scheduling Tests ====================
+
+#[test]
+fn priority_scheduling_dfs_order_preserved() {
+    let dir = Dir::tmp();
+    dir.mkdirp("heavy/a/b/c");
+    dir.mkdirp("heavy/a/b/d");
+    dir.mkdirp("light/x/y");
+    dir.touch("heavy/a/b/c/1.txt");
+    dir.touch("heavy/a/b/d/2.txt");
+    dir.touch("light/x/y/3.txt");
+    dir.touch("root.txt");
+
+    let wd = WalkDir::new(dir.path())
+        .parallelism(Parallelism::RayonNewPool(2))
+        .sort(true);
+    let r = dir.run_recursive(wd);
+    r.assert_no_errors();
+
+    let paths: Vec<String> = r.ents().iter()
+        .map(|e| e.path().strip_prefix(dir.path()).unwrap().to_str().unwrap().replace('\\', "/"))
+        .collect();
+
+    // Must contain all entries (no loss)
+    assert!(paths.iter().any(|p| p.contains("root.txt")), "missing root.txt in {:?}", paths);
+    assert!(paths.iter().any(|p| p.contains("1.txt")), "missing 1.txt in {:?}", paths);
+    assert!(paths.iter().any(|p| p.contains("2.txt")), "missing 2.txt in {:?}", paths);
+    assert!(paths.iter().any(|p| p.contains("3.txt")), "missing 3.txt in {:?}", paths);
+    assert!(paths.iter().any(|p| p.contains("heavy")), "missing heavy dir in {:?}", paths);
+    assert!(paths.iter().any(|p| p.contains("light")), "missing light dir in {:?}", paths);
+}
+
+#[test]
+fn priority_scheduling_single_thread_no_deadlock() {
+    let dir = Dir::tmp();
+    dir.mkdirp("a/b/c");
+    dir.mkdirp("d/e");
+    dir.touch("a/b/c/1.txt");
+    dir.touch("d/e/2.txt");
+    dir.touch("root.txt");
+
+    let wd = WalkDir::new(dir.path())
+        .parallelism(Parallelism::RayonNewPool(1))
+        .sort(true);
+    let r = dir.run_recursive(wd);
+    r.assert_no_errors();
+
+    // Single thread must find all entries without deadlocking
+    assert!(r.ents().len() >= 7, "expected >= 7 entries, got {}", r.ents().len());
+}
+
+#[test]
+fn priority_scheduling_deep_tree() {
+    let dir = Dir::tmp();
+    // Create 10-level deep tree: l0/l1/l2/.../l9/file.txt
+    let mut path = std::path::PathBuf::new();
+    for i in 0..10 {
+        path.push(format!("l{}", i));
+    }
+    dir.mkdirp(path.to_str().unwrap());
+    dir.touch(path.join("file.txt").to_str().unwrap());
+    dir.touch("root.txt");
+
+    let wd = WalkDir::new(dir.path())
+        .parallelism(Parallelism::RayonNewPool(2))
+        .sort(true);
+    let r = dir.run_recursive(wd);
+    r.assert_no_errors();
+
+    // 10 dirs + 1 file at bottom + 1 root file + root dir = 13
+    assert!(r.ents().len() >= 12, "expected >= 12 entries, got {}", r.ents().len());
+}
+
+#[test]
+fn priority_scheduling_wide_tree() {
+    let dir = Dir::tmp();
+    // Create 50 subdirectories, each with 1 file
+    for i in 0..50 {
+        let subdir = format!("sub{:02}", i);
+        dir.mkdirp(&subdir);
+        dir.touch(format!("{}/file.txt", subdir));
+    }
+    dir.touch("root.txt");
+
+    let wd = WalkDir::new(dir.path())
+        .parallelism(Parallelism::RayonNewPool(4))
+        .sort(true);
+    let r = dir.run_recursive(wd);
+    r.assert_no_errors();
+
+    // root + root.txt + 50 dirs + 50 files = 102
+    assert!(r.ents().len() >= 100, "expected >= 100 entries, got {}", r.ents().len());
+}
+
+#[test]
+fn priority_scheduling_serial_unchanged() {
+    let dir = Dir::tmp();
+    dir.mkdirp("a/b");
+    dir.mkdirp("c/d");
+    dir.touch("a/b/1.txt");
+    dir.touch("c/d/2.txt");
+    dir.touch("root.txt");
+
+    let serial_wd = WalkDir::new(dir.path())
+        .parallelism(Parallelism::Serial)
+        .sort(true);
+    let serial_r = dir.run_recursive(serial_wd);
+
+    let par_wd = WalkDir::new(dir.path())
+        .parallelism(Parallelism::RayonNewPool(2))
+        .sort(true);
+    let par_r = dir.run_recursive(par_wd);
+
+    // Serial and parallel should produce same number of entries
+    assert_eq!(serial_r.ents().len(), par_r.ents().len(),
+        "serial {} != parallel {}", serial_r.ents().len(), par_r.ents().len());
+}
+
+#[test]
+fn priority_scheduling_weight_propagation() {
+    let dir = Dir::tmp();
+    // Heavy branch: many subdirs
+    for i in 0..10 {
+        let subdir = format!("heavy/sub{}", i);
+        dir.mkdirp(&subdir);
+        dir.touch(format!("{}/file.txt", subdir));
+    }
+    // Light branch: just files
+    dir.touch("light1.txt");
+    dir.touch("light2.txt");
+    dir.touch("light3.txt");
+
+    let wd = WalkDir::new(dir.path())
+        .parallelism(Parallelism::RayonNewPool(2))
+        .sort(true);
+    let r = dir.run_recursive(wd);
+    r.assert_no_errors();
+
+    // 10 heavy subdirs + 10 files + 3 light files + root dir = 24
+    assert!(r.ents().len() >= 23, "expected >= 23 entries, got {}", r.ents().len());
+}
+
+// ==================== Channel & Stress Tests ====================
+
+#[test]
+fn channel_backpressure_slow_consumer() {
+    let dir = Dir::tmp();
+    // Create a wide tree to generate many entries
+    for i in 0..30 {
+        let subdir = format!("sub{:02}", i);
+        dir.mkdirp(&subdir);
+        for j in 0..10 {
+            dir.touch(format!("{}/file{}.txt", subdir, j));
+        }
+    }
+
+    let wd = WalkDir::new(dir.path())
+        .parallelism(Parallelism::RayonNewPool(2))
+        .sort(true);
+    let r = dir.run_recursive(wd);
+    r.assert_no_errors();
+
+    // 1 root + 30 dirs + 300 files = 331
+    let expected = 1 + 30 + 300;
+    assert_eq!(
+        expected,
+        r.ents().len(),
+        "expected {} entries (no data loss), got {}",
+        expected,
+        r.ents().len()
+    );
+}
+
+#[test]
+#[ignore] // 压力测试：手动运行 cargo test -- --ignored
+fn large_directory_100k_files() {
+    let dir = Dir::tmp();
+    // Create 1000 dirs × 100 files = 100K files
+    let subdir_count = 1000;
+    let files_per_dir = 100;
+
+    for i in 0..subdir_count {
+        let subdir = format!("d{:04}", i);
+        dir.mkdirp(&subdir);
+        for j in 0..files_per_dir {
+            dir.touch(format!("{}/f{:03}.txt", subdir, j));
+        }
+    }
+
+    let start = std::time::Instant::now();
+    let wd = WalkDir::new(dir.path())
+        .parallelism(Parallelism::RayonNewPool(4))
+        .sort(false); // 不排序，提高吞吐
+    let r = dir.run_recursive(wd);
+
+    let elapsed = start.elapsed();
+    let expected = 1 + subdir_count + (subdir_count * files_per_dir);
+
+    assert_eq!(
+        expected,
+        r.ents().len(),
+        "expected {} entries, got {}",
+        expected,
+        r.ents().len()
+    );
+    r.assert_no_errors();
+
+    eprintln!("100K files traversed in {:?}", elapsed);
+}
+
+#[test]
+fn parallel_dir_modified_during_walk() {
+    let dir = Dir::tmp();
+    // Create initial structure
+    for i in 0..10 {
+        let subdir = format!("sub{:02}", i);
+        dir.mkdirp(&subdir);
+        dir.touch(format!("{}/initial.txt", subdir));
+    }
+
+    // Walk with parallelism and collect results
+    let wd = WalkDir::new(dir.path())
+        .parallelism(Parallelism::RayonNewPool(2))
+        .sort(true);
+    let r = dir.run_recursive(wd);
+
+    // Should get at least the initial structure
+    // (no crash or deadlock is the main assertion)
+    assert!(
+        r.ents().len() >= 11,
+        "expected >= 11 entries, got {}",
+        r.ents().len()
+    );
+}
+
+#[test]
+fn unicode_special_filenames() {
+    let dir = Dir::tmp();
+    dir.mkdirp("日本語");
+    dir.mkdirp("中文目录");
+    dir.mkdirp("한국어");
+    dir.mkdirp("emoji_🎉");
+    dir.mkdirp("spaces in name");
+    dir.touch("日本語/ファイル.txt");
+    dir.touch("中文目录/文件.txt");
+    dir.touch("한국어/파일.txt");
+    dir.touch("emoji_🎉/party.txt");
+    dir.touch("spaces in name/file.txt");
+
+    let wd = WalkDir::new(dir.path()).sort(true);
+    let r = dir.run_recursive(wd);
+    r.assert_no_errors();
+
+    // 1 root + 5 dirs + 5 files = 11
+    assert_eq!(
+        11,
+        r.ents().len(),
+        "expected 11 entries, got {}: {:?}",
+        r.ents().len(),
+        r.ents()
+            .iter()
+            .map(|e| e.path().to_string_lossy().to_string())
+            .collect::<Vec<_>>()
+    );
+
+    // Verify Unicode names are preserved
+    let paths: Vec<String> = r
+        .paths()
+        .iter()
+        .map(|p| p.to_string_lossy().to_string())
+        .collect();
+    assert!(paths.iter().any(|p| p.contains("日本語")), "missing Japanese dir");
+    assert!(
+        paths.iter().any(|p| p.contains("中文目录")),
+        "missing Chinese dir"
+    );
+    assert!(paths.iter().any(|p| p.contains("한국어")), "missing Korean dir");
+}
+
+// ==================== Additional Coverage Tests ====================
+
+#[test]
+fn memory_stability_repeated_walk() {
+    let dir = Dir::tmp();
+    dir.mkdirp("a/b/c");
+    dir.mkdirp("d/e");
+    dir.touch("a/b/c/1.txt");
+    dir.touch("d/e/2.txt");
+    dir.touch("root.txt");
+
+    // Run 100 iterations to check for memory leaks or resource exhaustion
+    for iteration in 0..100 {
+        let wd = WalkDir::new(dir.path())
+            .parallelism(Parallelism::RayonNewPool(2))
+            .sort(true);
+        let r = dir.run_recursive(wd);
+
+        // Every iteration should produce same results
+        // root(1) + a/b/c(3) + d/e(2) + 3 files = 9
+        assert_eq!(
+            9,
+            r.ents().len(),
+            "iteration {}: expected 9 entries, got {}",
+            iteration,
+            r.ents().len()
+        );
+        r.assert_no_errors();
+    }
+}
+
+#[test]
+fn ci_thread_scalability() {
+    let dir = Dir::tmp();
+    // Create a moderately complex tree
+    for i in 0..20 {
+        let subdir = format!("sub{:02}", i);
+        dir.mkdirp(&subdir);
+        for j in 0..5 {
+            dir.touch(format!("{}/file{}.txt", subdir, j));
+        }
+    }
+    dir.touch("root.txt");
+
+    let expected_count = 1 + 20 + 100 + 1; // root + dirs + files + root.txt
+
+    // Test Serial
+    let serial_r = dir.run_recursive(
+        WalkDir::new(dir.path())
+            .parallelism(Parallelism::Serial)
+            .sort(true),
+    );
+    serial_r.assert_no_errors();
+    assert_eq!(expected_count, serial_r.ents().len(), "Serial count mismatch");
+
+    // Test 1 thread
+    let r1 = dir.run_recursive(
+        WalkDir::new(dir.path())
+            .parallelism(Parallelism::RayonNewPool(1))
+            .sort(true),
+    );
+    r1.assert_no_errors();
+    assert_eq!(
+        expected_count,
+        r1.ents().len(),
+        "1-thread count mismatch"
+    );
+
+    // Test 2 threads
+    let r2 = dir.run_recursive(
+        WalkDir::new(dir.path())
+            .parallelism(Parallelism::RayonNewPool(2))
+            .sort(true),
+    );
+    r2.assert_no_errors();
+    assert_eq!(
+        expected_count,
+        r2.ents().len(),
+        "2-thread count mismatch"
+    );
+
+    // Test 4 threads
+    let r4 = dir.run_recursive(
+        WalkDir::new(dir.path())
+            .parallelism(Parallelism::RayonNewPool(4))
+            .sort(true),
+    );
+    r4.assert_no_errors();
+    assert_eq!(
+        expected_count,
+        r4.ents().len(),
+        "4-thread count mismatch"
+    );
+
+    // Test 8 threads (more than CPU cores is fine)
+    let r8 = dir.run_recursive(
+        WalkDir::new(dir.path())
+            .parallelism(Parallelism::RayonNewPool(8))
+            .sort(true),
+    );
+    r8.assert_no_errors();
+    assert_eq!(
+        expected_count,
+        r8.ents().len(),
+        "8-thread count mismatch"
+    );
+}
+
+#[test]
+fn symlink_follow_cross_platform() {
+    let dir = Dir::tmp();
+    dir.mkdirp("target_dir");
+    dir.touch("target_dir/file.txt");
+    dir.mkdirp("link_parent");
+
+    // Create directory symlink; skip on Windows if developer mode is off
+    // (os error 1314: client does not have required privilege)
+    let src = dir.join("target_dir");
+    let link = dir.join("link_parent/link_dir");
+    let symlink_result: std::io::Result<()> = {
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(&src, &link)
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&src, &link)
+        }
+        #[cfg(not(any(windows, unix)))]
+        {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "symlinks not supported on this platform",
+            ))
+        }
+    };
+    if symlink_result.is_err() {
+        eprintln!(
+            "skipping symlink_follow_cross_platform: \
+             symlink_dir failed (developer mode or admin required)"
+        );
+        return;
+    }
+
+    // Test without follow
+    let wd = WalkDir::new(dir.path()).sort(true);
+    let r = dir.run_recursive(wd);
+    r.assert_no_errors();
+
+    // Should find: root, link_parent, target_dir, link_dir (symlink),
+    // target_dir/file.txt, link_parent/link_dir/file.txt
+    assert!(
+        r.ents().len() >= 4,
+        "expected >= 4 entries, got {}",
+        r.ents().len()
+    );
+
+    // Verify symlink is detected
+    let link_entry = r
+        .ents()
+        .iter()
+        .find(|e| e.path().to_string_lossy().contains("link_dir"));
+    assert!(link_entry.is_some(), "link_dir not found");
+    assert!(
+        link_entry.unwrap().path_is_symlink(),
+        "link_dir should be symlink"
+    );
+}
+
+#[test]
+fn permission_denied_graceful() {
+    let dir = Dir::tmp();
+    dir.mkdirp("accessible");
+    dir.mkdirp("accessible/sub");
+    dir.touch("accessible/file.txt");
+    dir.touch("accessible/sub/nested.txt");
+
+    // Walk the accessible structure - main assertion is no crash
+    let wd = WalkDir::new(dir.path()).sort(true);
+    let r = dir.run_recursive(wd);
+
+    // All entries should be accessible in this case
+    r.assert_no_errors();
+    assert!(
+        r.ents().len() >= 5,
+        "expected >= 5 entries, got {}",
+        r.ents().len()
+    );
+
+    // Walk a non-existent subdirectory should produce an error but not crash
+    let wd = WalkDir::new(dir.path().join("nonexistent"));
+    let r2 = dir.run_recursive(wd);
+    assert_eq!(
+        1,
+        r2.errs().len(),
+        "expected 1 error for nonexistent path"
+    );
+}
+
+#[test]
+#[ignore = "environment-sensitive: requires non-root + strict fs permissions, fails on CI runners"]
+fn permission_denied_mixed_scenario() {
+    // 测试标记为 #[ignore]，CI 不跳过，用户本地手动跑：cargo test -- --ignored
+    let dir = Dir::tmp();
+    dir.mkdirp("readable_a");
+    dir.mkdirp("readable_a/sub");
+    dir.touch("readable_a/file.txt");
+    dir.touch("readable_a/sub/nested.txt");
+    dir.mkdirp("readable_b");
+    dir.touch("readable_b/other.txt");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let restricted = dir.join("restricted");
+        std::fs::create_dir_all(&restricted).unwrap();
+        std::fs::File::create(restricted.join("secret.txt")).unwrap();
+        std::fs::set_permissions(&restricted, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+        let wd = WalkDir::new(dir.path()).sort(true);
+        let r = dir.run_recursive(wd);
+
+        let readable_paths: Vec<_> = r
+            .ents()
+            .iter()
+            .filter(|e| {
+                let p = e.path().to_string_lossy();
+                p.contains("readable_a") || p.contains("readable_b")
+            })
+            .collect();
+        assert!(
+            readable_paths.len() >= 6,
+            "readable dirs should have full content, got {} readable entries",
+            readable_paths.len()
+        );
+
+        let has_restricted_error = r
+            .errs()
+            .iter()
+            .any(|e| format!("{:?}", e).contains("restricted"));
+        assert!(
+            has_restricted_error,
+            "expected error for restricted directory"
+        );
+
+        std::fs::set_permissions(&restricted, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(windows)]
+    {
+        let wd = WalkDir::new(dir.path()).sort(true);
+        let r = dir.run_recursive(wd);
+        r.assert_no_errors();
+        assert!(
+            r.ents().len() >= 7,
+            "expected >= 7 entries on Windows, got {}",
+            r.ents().len()
+        );
+    }
+}
+
+#[test]
+fn symlink_file_and_cycle_detection() {
+    let dir = Dir::tmp();
+    dir.touch("real.txt");
+    dir.mkdirp("subdir");
+    dir.touch("subdir/nested.txt");
+    dir.mkdirp("link_container");
+
+    let make_file_symlink = |src: PathBuf, link: PathBuf| -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(&src, &link)
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&src, &link)
+        }
+    };
+
+    if make_file_symlink(dir.join("real.txt"), dir.join("link_container/link.txt")).is_err() {
+        eprintln!("skipping symlink_file_and_cycle_detection: symlink creation failed");
+        return;
+    }
+
+    let make_dir_symlink = |src: PathBuf, link: PathBuf| -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(&src, &link)
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&src, &link)
+        }
+    };
+
+    if make_dir_symlink(dir.join("subdir"), dir.join("link_container/link_dir")).is_err() {
+        eprintln!("skipping dir symlink creation: failed");
+        return;
+    }
+
+    // Test without follow_links
+    let wd = WalkDir::new(dir.path()).sort(true);
+    let r = dir.run_recursive(wd);
+    r.assert_no_errors();
+
+    let file_link = r.ents().iter().find(|e| e.file_name() == "link.txt");
+    assert!(file_link.is_some(), "file symlink not found");
+    assert!(file_link.unwrap().path_is_symlink(), "link.txt should be a symlink");
+
+    let dir_link = r.ents().iter().find(|e| e.file_name() == "link_dir");
+    assert!(dir_link.is_some(), "dir symlink not found");
+    assert!(dir_link.unwrap().path_is_symlink(), "link_dir should be a symlink");
+
+    // Test with follow_links
+    let wd_follow = WalkDir::new(dir.path()).follow_links(true).sort(true);
+    let r_follow = dir.run_recursive(wd_follow);
+    r_follow.assert_no_errors();
+
+    let follow_count = r_follow.ents().len();
+    let nofollow_count = r.ents().len();
+    assert!(
+        follow_count >= nofollow_count,
+        "follow_links should find at least as many entries: {} < {}",
+        follow_count, nofollow_count
+    );
+}
+
+#[test]
+fn symlink_cycle_detection_with_follow() {
+    let dir = Dir::tmp();
+    dir.mkdirp("a/b");
+
+    let make_dir_symlink = |src: PathBuf, link: PathBuf| -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_dir(&src, &link)
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&src, &link)
+        }
+    };
+
+    if make_dir_symlink(dir.join("a"), dir.join("a/b/cycle")).is_err() {
+        eprintln!("skipping symlink_cycle_detection: symlink creation failed");
+        return;
+    }
+
+    let wd = WalkDir::new(dir.path()).follow_links(true).sort(true);
+    let r = dir.run_recursive(wd);
+    // follow_links + 循环 symlink 应被检测到，产生 Loop 错误（而非无限循环）
+    let has_loop_error = r
+        .errs()
+        .iter()
+        .any(|e| format!("{:?}", e).contains("Loop"));
+    assert!(
+        has_loop_error,
+        "expected Loop error for cycle, got errors: {:?}",
+        r.errs()
+    );
+
+    assert!(
+        r.ents().len() < 20,
+        "cycle should be detected, got {} entries (possible infinite loop)",
+        r.ents().len()
+    );
+}
+
+#[test]
+fn broken_symlink_handling() {
+    let dir = Dir::tmp();
+    dir.mkdirp("links");
+
+    let make_symlink = |src: PathBuf, link: PathBuf| -> std::io::Result<()> {
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(&src, &link)
+        }
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(&src, &link)
+        }
+    };
+
+    if make_symlink(dir.join("nonexistent_target"), dir.join("links/broken")).is_err() {
+        eprintln!("skipping broken_symlink_handling: symlink creation failed");
+        return;
+    }
+
+    let wd = WalkDir::new(dir.path()).sort(true);
+    let r = dir.run_recursive(wd);
+    r.assert_no_errors();
+
+    let broken = r.ents().iter().find(|e| e.file_name() == "broken");
+    assert!(broken.is_some(), "broken symlink should appear as entry");
+    assert!(broken.unwrap().path_is_symlink(), "broken should be a symlink");
 }

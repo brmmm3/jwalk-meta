@@ -2,9 +2,9 @@ use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{self, FileType};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
-use crate::{ClientState, Error, ReadDirSpec, Result, MetaData, get_metadata_ext, MetaDataExt};
+use crate::{ClientState, Error, ReadDirSpec, Result, MetaData, get_metadata_ext, MetaDataExt, AncestorIdentity};
 
 /// Representation of a file or directory.
 ///
@@ -43,23 +43,28 @@ pub struct DirEntry<C: ClientState> {
     pub metadata_ext: Option<MetaDataExt>,
     // True if [`follow_links`] is `true` AND was created from a symlink path.
     follow_link: bool,
-    // Origins of symlinks followed to get to this entry.
-    follow_link_ancestors: Arc<Vec<Arc<Path>>>,
+    // 符号链接祖先的 metadata identity 列表，用 Arc 共享避免 O(depth) 克隆。
+    // 循环检测通过预存的 identity (dev+ino / vol+file_index) 直接内存比较，
+    // 无需 O(depth) 次 fs::metadata 系统调用。
+    follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
+    // Lazily cached full path (parent_path + file_name).
+    cached_path: OnceLock<PathBuf>,
 }
 
 impl<C: ClientState> DirEntry<C> {
-    pub(crate) fn from_entry(
+    /// 从 NT Native API 获取的原始数据创建 DirEntry。
+    ///
+    /// 直接接受 `file_name`、`file_type` 和 `metadata`
+    /// 参数，无需从 `fs::DirEntry` 读取。
+    pub(crate) fn from_raw(
         depth: usize,
         parent_path: Arc<Path>,
         metadata: Option<MetaData>,
         metadata_ext: Option<MetaDataExt>,
-        fs_dir_entry: &fs::DirEntry,
-        follow_link_ancestors: Arc<Vec<Arc<Path>>>,
+        file_name: OsString,
+        file_type: FileType,
+        follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
     ) -> Result<Self> {
-        let file_type = fs_dir_entry
-            .file_type()
-            .map_err(|err| Error::from_path(depth, fs_dir_entry.path(), err))?;
-        let file_name = fs_dir_entry.file_name();
         let read_children_path: Option<Arc<Path>> = if file_type.is_dir() {
             Some(Arc::from(parent_path.join(&file_name)))
         } else {
@@ -80,17 +85,18 @@ impl<C: ClientState> DirEntry<C> {
             metadata_ext,
             follow_link: false,
             follow_link_ancestors,
+            cached_path: OnceLock::new(),
         })
     }
 
     // Only used for root and when following links.
-    pub fn from_path(
+pub fn from_path(
         depth: usize,
         path: &Path,
         read_metadata: bool,
         read_metadata_ext: bool,
         follow_link: bool,
-        follow_link_ancestors: Arc<Vec<Arc<Path>>>,
+        follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
     ) -> Result<Self> {
         let metadata = if follow_link {
             fs::metadata(path).map_err(|err| Error::from_path(depth, path.to_owned(), err))?
@@ -110,16 +116,7 @@ impl<C: ClientState> DirEntry<C> {
         let entry_metadata;
         let entry_metadata_ext;
         if read_metadata {
-            entry_metadata = Some(MetaData {
-                is_dir: metadata.is_dir(),
-                is_file: metadata.is_file(),
-                is_symlink: metadata.is_symlink(),
-                size: metadata.len(),
-                created: metadata.created().ok(),
-                modified: metadata.modified().ok(),
-                accessed: metadata.accessed().ok(),
-                permissions: Some(metadata.permissions()),
-            });
+            entry_metadata = Some(MetaData::from_fs_metadata(&metadata));
             if read_metadata_ext {
                 entry_metadata_ext = Some(get_metadata_ext(&metadata));
             } else {
@@ -144,6 +141,42 @@ impl<C: ClientState> DirEntry<C> {
             metadata_ext: entry_metadata_ext,
             follow_link,
             follow_link_ancestors,
+            cached_path: OnceLock::new(),
+        })
+    }
+
+    /// Create a DirEntry from a std::fs::DirEntry (non-Windows path).
+    #[allow(dead_code)]
+    pub(crate) fn from_entry(
+        depth: usize,
+        parent_path: Arc<Path>,
+        metadata: Option<MetaData>,
+        metadata_ext: Option<MetaDataExt>,
+entry: &fs::DirEntry,
+        follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
+    ) -> Result<Self> {
+        let file_type = entry.file_type().map_err(|err| Error::from_io(depth, err))?;
+        let read_children_path: Option<Arc<Path>> = if file_type.is_dir() {
+            Some(Arc::from(entry.path()))
+        } else {
+            None
+        };
+
+        Ok(DirEntry {
+            depth,
+            file_name: entry.file_name(),
+            file_type,
+            parent_path,
+            read_children_path,
+            read_children_error: None,
+            client_state: C::DirEntryState::default(),
+            read_metadata: metadata.is_some(),
+            metadata,
+            read_metadata_ext: metadata_ext.is_some(),
+            metadata_ext,
+            follow_link: false,
+            follow_link_ancestors,
+            cached_path: OnceLock::new(),
         })
     }
 
@@ -179,8 +212,12 @@ impl<C: ClientState> DirEntry<C> {
     /// Path to the file/directory represented by this entry.
     ///
     /// The path is created by joining `parent_path` with `file_name`.
-    pub fn path(&self) -> PathBuf {
-        self.parent_path.join(&self.file_name)
+    /// Result is cached in OnceLock to avoid repeated allocations.
+    /// Returns a reference to the cached path, avoiding clone overhead.
+    pub fn path(&self) -> &Path {
+        self.cached_path
+            .get_or_init(|| self.parent_path.join(&self.file_name))
+            .as_path()
     }
 
     /// Returns `true` if and only if this entry was created from a symbolic
@@ -252,7 +289,7 @@ impl<C: ClientState> DirEntry<C> {
         let origins = self.follow_link_ancestors.clone();
         let dir_entry = DirEntry::from_path(
             self.depth,
-            &path,
+            path,
             self.read_metadata,
             self.read_metadata_ext,
             true,
@@ -260,19 +297,58 @@ impl<C: ClientState> DirEntry<C> {
         )?;
 
         if dir_entry.file_type.is_dir() {
-            let target = fs::read_link(&path).map_err(|err| Error::from_io(self.depth, err))?;
-            for ancestor in self.follow_link_ancestors.iter().rev() {
-                if target.as_path() == ancestor.as_ref() {
-                    return Err(Error::from_loop(
-                        self.depth,
-                        ancestor.as_ref(),
-                        path.as_ref(),
-                    ));
+            let target = fs::read_link(path).map_err(|err| Error::from_io(self.depth, err))?;
+            // 解析符号链接目标为绝对路径
+            let resolved_target = if target.is_absolute() {
+                target
+            } else {
+                self.parent_path.join(&target)
+            };
+            let canonical_target = resolved_target.canonicalize().ok().unwrap_or(resolved_target);
+
+            // 使用 metadata identity 进行循环检测（比 canonicalize 路径比较更可靠高效）
+            // Unix: (dev, ino) 对标识唯一文件系统对象
+            // Windows: (volume_serial_number, file_index) 对标识唯一文件系统对象
+            if let Ok(target_meta) = fs::metadata(&canonical_target) {
+                let target_ext = get_metadata_ext(&target_meta);
+
+                // 预存的 ancestor identity 直接内存比较，无需 O(depth) 次 stat。
+                if let Some(ancestors) = &self.follow_link_ancestors {
+                    for ancestor in ancestors.iter().rev() {
+                        if Self::ancestor_identity_eq(&target_ext, ancestor) {
+                            return Err(Error::from_loop(
+                                self.depth,
+                                &ancestor.path,
+                                path,
+                            ));
+                        }
+                    }
                 }
             }
         }
 
         Ok(dir_entry)
+    }
+
+    /// 比较 target MetaDataExt 与预存的 ancestor identity 是否为同一文件系统对象。
+    ///
+    /// Unix: 比较 (dev, ino)
+    /// Windows: 比较 (volume_serial_number, file_index)
+    /// 如果 ancestor identity 字段不完整则返回 false（保守策略：宁可漏检也不误报）。
+    fn ancestor_identity_eq(target: &MetaDataExt, ancestor: &AncestorIdentity) -> bool {
+        #[cfg(unix)]
+        {
+            target.st_dev == ancestor.dev && target.st_ino == ancestor.ino
+        }
+        #[cfg(windows)]
+        {
+            match (target.volume_serial_number, target.file_index, ancestor.volume_serial_number, ancestor.file_index) {
+                (Some(vol_t), Some(idx_t), Some(vol_a), Some(idx_a)) => {
+                    vol_t == vol_a && idx_t == idx_a
+                }
+                _ => false,
+            }
+        }
     }
 }
 

@@ -177,6 +177,12 @@ impl Error {
         }
     }
 
+    /// 线程池繁忙时返回的错误。
+    ///
+    /// `depth` 设为 0 是合理的：此错误不关联任何文件路径，
+    /// 而是表示线程池无法接受新的遍历任务。
+    /// 调用者应通过 [`from_path`] 或 [`from_entry`] 报告
+    /// 带有正确 depth 的路径相关错误。
     pub(crate) fn busy() -> Self {
         Error {
             depth: 0,
@@ -197,7 +203,7 @@ impl Error {
         Error {
             depth: dent.depth(),
             inner: ErrorInner::Io {
-                path: Some(dent.path()),
+                path: Some(dent.path().to_path_buf()),
                 err,
             },
         }
@@ -221,25 +227,72 @@ impl Error {
     }
 }
 
+/// 判断 jwalk-meta Error 是否为可重试的临时 I/O 错误。
+///
+/// 分类逻辑：
+/// - `raw_os_error()` 为主（平台特定错误码精确匹配）
+/// - `io::ErrorKind` 为辅（跨平台回退）
+///
+/// 不可重试的错误类型（Loop / ThreadpoolBusy）直接返回 false。
+pub(crate) fn is_transient_error(err: &Error) -> bool {
+    match err.inner {
+        ErrorInner::Io { ref err, .. } => is_transient_io_error(err),
+        ErrorInner::Loop { .. } | ErrorInner::ThreadpoolBusy => false,
+    }
+}
+
+/// 判断 io::Error 是否为可重试的临时 I/O 错误。
+///
+/// **Windows 可重试错误码：**
+/// - 32 `ERROR_SHARING_VIOLATION`: 文件被其他进程占用（SMB 高并发常见）
+/// - 33 `ERROR_LOCK_VIOLATION`: 文件锁冲突
+/// - 54 `ERROR_NETWORK_BUSY`: 网络忙
+/// - 121 `ERROR_SEM_TIMEOUT`: 信号量超时（SMB 连接超时）
+/// - 1237 `ERROR_RETRY`: 系统要求重试
+///
+/// **Unix 可重试错误码：**
+/// - 11 `EAGAIN`: 资源暂时不可用
+/// - 16 `EBUSY`: 设备或资源忙
+/// - 150 `ESTALE`: NFS 文件句柄失效
+///
+/// **通用可重试 ErrorKind：**
+/// TimedOut / Interrupted / WouldBlock / ConnectionReset / ConnectionAborted
+fn is_transient_io_error(err: &io::Error) -> bool {
+    if let Some(code) = err.raw_os_error() {
+        #[cfg(windows)]
+        {
+            return matches!(code,
+                32 |    // ERROR_SHARING_VIOLATION
+                33 |    // ERROR_LOCK_VIOLATION
+                54 |    // ERROR_NETWORK_BUSY
+                121 |   // ERROR_SEM_TIMEOUT
+                1237    // ERROR_RETRY
+            );
+        }
+        #[cfg(not(windows))]
+        {
+            return matches!(code,
+                11 |    // EAGAIN
+                16 |    // EBUSY
+                150     // ESTALE
+            );
+        }
+    }
+    matches!(err.kind(),
+        io::ErrorKind::TimedOut |
+        io::ErrorKind::Interrupted |
+        io::ErrorKind::WouldBlock |
+        io::ErrorKind::ConnectionReset |
+        io::ErrorKind::ConnectionAborted
+    )
+}
+
 impl error::Error for Error {
     fn source(&self) -> Option<&(dyn error::Error + 'static)> {
         match self.inner {
             ErrorInner::Io { ref err, .. } => Some(err),
             ErrorInner::Loop { .. } | ErrorInner::ThreadpoolBusy => None,
         }
-    }
-
-    #[allow(deprecated)]
-    fn description(&self) -> &str {
-        match self.inner {
-            ErrorInner::Io { ref err, .. } => err.description(),
-            ErrorInner::Loop { .. } => "file system loop found",
-            ErrorInner::ThreadpoolBusy => "thread-pool busy",
-        }
-    }
-
-    fn cause(&self) -> Option<&dyn error::Error> {
-        self.source()
     }
 }
 

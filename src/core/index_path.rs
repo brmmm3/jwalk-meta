@@ -1,12 +1,13 @@
+use smallvec::SmallVec;
 use std::cmp::Ordering;
 
 #[derive(Clone, Debug)]
 pub struct IndexPath {
-    pub indices: Vec<usize>,
+    pub indices: SmallVec<[usize; 8]>,
 }
 
 impl IndexPath {
-    pub fn new(indices: Vec<usize>) -> IndexPath {
+    pub fn new(indices: SmallVec<[usize; 8]>) -> IndexPath {
         IndexPath { indices }
     }
 
@@ -21,7 +22,10 @@ impl IndexPath {
     }
 
     pub fn increment_last(&mut self) {
-        *self.indices.last_mut().unwrap() += 1;
+        debug_assert!(!self.indices.is_empty(), "IndexPath::increment_last called on empty indices");
+        if let Some(last) = self.indices.last_mut() {
+            *last += 1;
+        }
     }
 
     pub fn pop(&mut self) -> Option<usize> {

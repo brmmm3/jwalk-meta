@@ -66,3 +66,12 @@ no_llvm_build
 
 /benches/assets/linux_checkout
 Cargo.lock
+.omo/
+graphify-out/
+
+# Beads / Dolt files (added by bd init)
+.dolt/
+*.db
+.beads-credential-key
+.beads/proxieddb/
+.opencode/

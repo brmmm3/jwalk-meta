@@ -1,4 +1,7 @@
 use std::iter::Peekable;
+use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::Arc;
+use std::vec;
 
 use super::*;
 use crate::Result;
@@ -12,6 +15,16 @@ pub struct DirEntryIter<C: ClientState> {
     pub(crate) read_dir_iter: Option<Peekable<ReadDirIter<C>>>,
     // stack of ReadDir results, track location in filesystem traversal
     read_dir_results_stack: Vec<vec::IntoIter<Result<DirEntry<C>>>>,
+    // stop flag to signal rayon workers on drop
+    stop: Option<Arc<AtomicBool>>,
+}
+
+impl<C: ClientState> Drop for DirEntryIter<C> {
+    fn drop(&mut self) {
+        if let Some(stop) = &self.stop {
+            stop.store(true, AtomicOrdering::Release);
+        }
+    }
 }
 
 impl<C: ClientState> DirEntryIter<C> {
@@ -21,6 +34,8 @@ impl<C: ClientState> DirEntryIter<C> {
         min_depth: usize,
         root_read_dir_state: C::ReadDirState,
         core_read_dir_callback: Arc<ReadDirCallback<C>>,
+        channel_capacity: usize,
+        max_receive_buffer_size: usize,
     ) -> DirEntryIter<C> {
         // 1. Gather read_dir_specs from root level
         let read_dir_specs: Vec<_> = root_entry_results
@@ -34,9 +49,11 @@ impl<C: ClientState> DirEntryIter<C> {
             .collect();
 
         // 2. Init new read_dir_iter from those specs
-        let read_dir_iter =
-            ReadDirIter::try_new(read_dir_specs, parallelism, core_read_dir_callback)
-                .map(|iter| iter.peekable());
+        let (read_dir_iter, stop) =
+            match ReadDirIter::try_new(read_dir_specs, parallelism, core_read_dir_callback, channel_capacity, max_receive_buffer_size) {
+                Some((iter, stop)) => (Some(iter.peekable()), stop),
+                None => (None, None),
+            };
 
         // 3. Return DirEntryIter that will return initial root entries and then
         //    fill and process read_dir_iter until complete
@@ -44,6 +61,7 @@ impl<C: ClientState> DirEntryIter<C> {
             min_depth,
             read_dir_iter,
             read_dir_results_stack: vec![root_entry_results.into_iter()],
+            stop,
         }
     }
 
@@ -52,7 +70,10 @@ impl<C: ClientState> DirEntryIter<C> {
         results: &mut Vec<vec::IntoIter<Result<DirEntry<C>>>>,
     ) -> Result<()> {
         // Push next read dir results or return error if read failed
-        let read_dir_result = iter.next().unwrap();
+        let read_dir_result = match iter.next() {
+            Some(result) => result,
+            None => return Err(Error::busy()),
+        };
         let read_dir = match read_dir_result {
             Ok(read_dir) => read_dir,
             Err(err) => return Err(err),

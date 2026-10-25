@@ -1,36 +1,43 @@
 //! Ordered queue backed by a channel.
+//!
+//! 完成判定基于 OrderedMatcher（DFS 前序）+ channel disconnect，不依赖手动
+//! pending_count。原先的 AtomicUsize 影子计数与 channel send 之间存在 race
+//! 窗口（producer send 成功但 fetch_add 之前 consumer 已 drain 并 fetch_sub），
+//! 导致 usize 下溢到 MAX。即便补救 fetch_add 也会在并发交错下制造虚假的
+//! 非零计数，且该计数在 Strict 模式下从不被读取——纯 UB 源 + 死代码。
 
 use crossbeam::channel::{self, Receiver, SendError, Sender, TryRecvError};
+use smallvec::smallvec;
 use std::collections::BinaryHeap;
-use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
+use std::sync::atomic::Ordering as AtomicOrdering;
 use std::thread;
+use std::time::{Duration, Instant};
 
 use super::*;
+
+/// BinaryHeap 初始容量：256 是经验值，平衡初始内存占用和重新分配次数。
+const INITIAL_HEAP_CAPACITY: usize = 256;
+
+/// Strict 模式等待队头元素的最大时长，超时后返回 Empty 让出线程重试。
+const STRICT_WAIT_TIMEOUT: Duration = Duration::from_millis(100);
 
 pub(crate) struct OrderedQueue<T>
 where
     T: Send,
 {
     sender: Sender<Ordered<T>>,
-    pending_count: Arc<AtomicUsize>,
     stop: Arc<AtomicBool>,
-}
-
-pub enum Ordering {
-    Relaxed,
-    Strict,
 }
 
 pub struct OrderedQueueIter<T>
 where
     T: Send,
 {
-    ordering: Ordering,
     stop: Arc<AtomicBool>,
     receiver: Receiver<Ordered<T>>,
     receive_buffer: BinaryHeap<Ordered<T>>,
-    pending_count: Arc<AtomicUsize>,
     ordered_matcher: OrderedMatcher,
+    max_receive_buffer_size: usize,
 }
 
 struct OrderedMatcher {
@@ -40,26 +47,24 @@ struct OrderedMatcher {
 
 pub(crate) fn new_ordered_queue<T>(
     stop: Arc<AtomicBool>,
-    ordering: Ordering,
+    channel_capacity: usize,
+    max_receive_buffer_size: usize,
 ) -> (OrderedQueue<T>, OrderedQueueIter<T>)
 where
     T: Send,
 {
-    let pending_count = Arc::new(AtomicUsize::new(0));
-    let (sender, receiver) = channel::unbounded();
+    let (sender, receiver) = channel::bounded(channel_capacity);
     (
         OrderedQueue {
             sender,
-            pending_count: pending_count.clone(),
             stop: stop.clone(),
         },
         OrderedQueueIter {
-            ordering,
             receiver,
             ordered_matcher: OrderedMatcher::default(),
-            receive_buffer: BinaryHeap::new(),
-            pending_count,
+            receive_buffer: BinaryHeap::with_capacity(INITIAL_HEAP_CAPACITY),
             stop,
+            max_receive_buffer_size,
         },
     )
 }
@@ -69,12 +74,7 @@ where
     T: Send,
 {
     pub fn push(&self, ordered: Ordered<T>) -> Result<(), SendError<Ordered<T>>> {
-        self.pending_count.fetch_add(1, AtomicOrdering::SeqCst);
         self.sender.send(ordered)
-    }
-
-    pub fn complete_item(&self) {
-        self.pending_count.fetch_sub(1, AtomicOrdering::SeqCst);
     }
 }
 
@@ -85,7 +85,6 @@ where
     fn clone(&self) -> Self {
         OrderedQueue {
             sender: self.sender.clone(),
-            pending_count: self.pending_count.clone(),
             stop: self.stop.clone(),
         }
     }
@@ -95,42 +94,47 @@ impl<T> OrderedQueueIter<T>
 where
     T: Send,
 {
-    fn pending_count(&self) -> usize {
-        self.pending_count.load(AtomicOrdering::SeqCst)
-    }
-
     fn is_stop(&self) -> bool {
-        self.stop.load(AtomicOrdering::SeqCst)
+        // Acquire: 确保看到 stop 标志的最新值。
+        self.stop.load(AtomicOrdering::Acquire)
     }
 
-    fn try_next_relaxed(&mut self) -> Result<Ordered<T>, TryRecvError> {
-        if self.is_stop() {
-            return Err(TryRecvError::Disconnected);
-        }
-
-        while let Ok(ordered_work) = self.receiver.try_recv() {
-            self.receive_buffer.push(ordered_work)
-        }
-
-        if let Some(ordered_work) = self.receive_buffer.pop() {
-            Ok(ordered_work)
-        } else if self.pending_count() == 0 {
-            Err(TryRecvError::Disconnected)
-        } else {
-            Err(TryRecvError::Empty)
+    /// 批量 drain channel 中所有就绪元素到 receive_buffer。
+    fn drain_channel(&mut self) {
+        while self.receive_buffer.len() < self.max_receive_buffer_size {
+            if let Ok(ordered) = self.receiver.try_recv() {
+                self.receive_buffer.push(ordered);
+            } else {
+                break;
+            }
         }
     }
 
+    /// Strict 模式：优先等待队头（looking_for），超时后返回 Empty 让出线程重试。
+    ///
+    /// 仅在堆中无目标元素时才 drain channel，减少堆膨胀。超时不弹非目标元素，
+    /// 避免 OrderedMatcher 状态错乱；producer 最终会 push 目标元素或遍历完成
+    /// 触发 channel disconnect。
     fn try_next_strict(&mut self) -> Result<Ordered<T>, TryRecvError> {
-        let looking_for = &self.ordered_matcher.looking_for;
+        let deadline = Instant::now() + STRICT_WAIT_TIMEOUT;
 
         loop {
             if self.is_stop() {
                 return Err(TryRecvError::Disconnected);
             }
 
-            let top_ordered = self.receive_buffer.peek();
-            if let Some(top_ordered) = top_ordered {
+            // 仅当堆顶不是目标元素时才 drain channel，减少堆膨胀
+            let looking_for = &self.ordered_matcher.looking_for;
+            let top_matches = self.receive_buffer
+                .peek()
+                .map_or(false, |top| top.index_path.eq(looking_for));
+            if !top_matches {
+                self.drain_channel();
+            }
+
+            // 检查 buffer 中是否有目标元素
+            let looking_for = &self.ordered_matcher.looking_for;
+            if let Some(top_ordered) = self.receive_buffer.peek() {
                 if top_ordered.index_path.eq(looking_for) {
                     break;
                 }
@@ -140,14 +144,37 @@ where
                 return Err(TryRecvError::Disconnected);
             }
 
-            match self.receiver.try_recv() {
+            if Instant::now() >= deadline {
+                // 超时：返回 Empty 让 yield 重试，不破坏 matcher 状态。
+                return Err(TryRecvError::Empty);
+            }
+
+            // 带超时的阻塞等待
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let wait_time = remaining.max(Duration::from_micros(100));
+            match self.receiver.recv_timeout(wait_time) {
                 Ok(ordered) => {
                     self.receive_buffer.push(ordered);
                 }
-                Err(err) => match err {
-                    TryRecvError::Empty => thread::yield_now(),
-                    TryRecvError::Disconnected => break,
-                },
+                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                    continue;
+                }
+                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                    self.drain_channel();
+                    // 优先返回 looking_for 以保持正确性
+                    if let Some(top) = self.receive_buffer.peek() {
+                        if top.index_path.eq(&self.ordered_matcher.looking_for) {
+                            let ordered = self.receive_buffer.pop().unwrap();
+                            self.ordered_matcher.advance_past(&ordered);
+                            return Ok(ordered);
+                        }
+                    }
+                    // channel 断开后按堆序排空剩余元素（DFS 自然序）
+                    if let Some(fallback) = self.receive_buffer.pop() {
+                        return Ok(fallback);
+                    }
+                    return Err(TryRecvError::Disconnected);
+                }
             }
         }
 
@@ -164,18 +191,10 @@ where
     type Item = Ordered<T>;
     fn next(&mut self) -> Option<Ordered<T>> {
         loop {
-            let try_next = match self.ordering {
-                Ordering::Relaxed => self.try_next_relaxed(),
-                Ordering::Strict => self.try_next_strict(),
-            };
-            match try_next {
-                Ok(next) => {
-                    return Some(next);
-                }
-                Err(err) => match err {
-                    TryRecvError::Empty => thread::yield_now(),
-                    TryRecvError::Disconnected => return None,
-                },
+            match self.try_next_strict() {
+                Ok(next) => return Some(next),
+                Err(TryRecvError::Empty) => thread::yield_now(),
+                Err(TryRecvError::Disconnected) => return None,
             }
         }
     }
@@ -187,7 +206,9 @@ impl OrderedMatcher {
     }
 
     fn decrement_remaining_children(&mut self) {
-        *self.child_count_stack.last_mut().unwrap() -= 1;
+        if let Some(count) = self.child_count_stack.last_mut() {
+            *count = count.saturating_sub(1);
+        }
     }
 
     fn advance_past<T>(&mut self, ordered: &Ordered<T>) {
@@ -213,7 +234,7 @@ impl OrderedMatcher {
 impl Default for OrderedMatcher {
     fn default() -> OrderedMatcher {
         OrderedMatcher {
-            looking_for: IndexPath::new(vec![0]),
+            looking_for: IndexPath::new(smallvec![0]),
             child_count_stack: vec![1],
         }
     }

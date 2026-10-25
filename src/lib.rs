@@ -1,5 +1,9 @@
 #![warn(clippy::all)]
 #![cfg_attr(windows, feature(windows_by_handle))]
+#![cfg_attr(feature = "legacy-read-dir", allow(dead_code))]
+// legacy-read-dir 是 benchmark 对比 feature，启用时 Unix 走 fs::read_dir fallback，
+// 导致 StreamingContext / read_dir_linux_via_getdents 等流式相关代码 unused。
+// 这些 warning 是预期的（feature 切换必然产物），全局抑制。
 
 //! Filesystem walk.
 //!
@@ -49,14 +53,14 @@
 //!             (Err(_), Ok(_)) => Ordering::Greater,
 //!             (Err(_), Err(_)) => Ordering::Equal,
 //!         });
-//!         // 2. Custom filter
+//!         // 2. Custom filter (keep Err entries to propagate I/O errors)
 //!         children.retain(|dir_entry_result| {
 //!             dir_entry_result.as_ref().map(|dir_entry| {
 //!                 dir_entry.file_name
 //!                     .to_str()
 //!                     .map(|s| s.starts_with('.'))
 //!                     .unwrap_or(false)
-//!             }).unwrap_or(false)
+//!             }).unwrap_or(true)
 //!         });
 //!         // 3. Custom skip
 //!         children.iter_mut().for_each(|dir_entry_result| {
@@ -115,18 +119,56 @@
 
 mod core;
 
-use rayon::{ThreadPool, ThreadPoolBuilder};
+use rayon::ThreadPool;
 use std::cmp::Ordering;
 use std::ffi::OsStr;
 use std::fmt::Debug;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use core::is_transient_error;
 
-use crate::core::{get_metadata_ext, ReadDir, ReadDirSpec};
+use crate::core::{get_metadata_ext, ReadDir, ReadDirSpec, AncestorIdentity};
+#[cfg(not(all(target_os = "linux", feature = "legacy-read-dir")))]
+use crate::core::Weighted;  // 仅 getdents64 流式路径需要
 
 pub use crate::core::{DirEntry, DirEntryIter, Error, MetaData, MetaDataExt};
 pub use rayon;
+
+/// 返回 io_uring 是否在当前内核可用（Linux-only，运行时探测）。
+///
+/// 非 Linux 或 legacy-read-dir feature 启用时始终返回 false。
+/// 用于示例程序和诊断工具显示后端状态。
+#[cfg(all(
+    target_os = "linux",
+    target_env = "gnu",
+    not(feature = "legacy-read-dir"),
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "loongarch64",
+        target_arch = "powerpc64",
+    ),
+))]
+pub fn linux_io_uring_available() -> bool {
+    crate::core::linux_io_uring::io_uring_enabled()
+}
+
+#[cfg(not(all(
+    target_os = "linux",
+    not(feature = "legacy-read-dir"),
+    any(
+        target_arch = "x86_64",
+        target_arch = "aarch64",
+        target_arch = "riscv64",
+        target_arch = "loongarch64",
+        target_arch = "powerpc64",
+    )
+)))]
+pub fn linux_io_uring_available() -> bool {
+    false
+}
 
 /// Builder for walking a directory.
 pub type WalkDir = WalkDirGeneric<((), ())>;
@@ -206,9 +248,30 @@ struct WalkDirOptions<C: ClientState> {
     follow_links: bool,
     read_metadata: bool,
     read_metadata_ext: bool,
+    /// 查询硬链接信息（NumberOfLinks + VolumeSerialNumber）。
+    /// 需要额外的 O(N) syscall（NtQueryInformationByName），仅 Windows 生效。
+    /// 默认 false。read_metadata_ext=true 时此选项才有意义。
+    read_hardlink_info: bool,
+    /// NT 枚举结果 Vec 的预分配容量（仅 Windows 生效）。
+    /// 大目录场景可调高减少重分配，小目录场景可调低节省内存。默认 512。
+    dir_entry_capacity: usize,
     parallelism: Parallelism,
     root_read_dir_state: C::ReadDirState,
     process_read_dir: Option<Arc<ProcessReadDirFunction<C>>>,
+    /// I/O 操作的临时错误最大重试次数。默认 3，设为 0 则不重试。
+    max_retries: u8,
+    /// 内部 channel 容量（PriorityQueue + OrderedQueue 共用）。
+    ///
+    /// crossbeam `bounded(N)` 在创建时预分配 N 个 Slot，每个 Slot 约 128-136 字节。
+    /// 默认 4096（约 0.5MB/channel），足以保持流水线满载。
+    /// 旧版默认 524288（约 68MB/channel），内存开销过大。
+    channel_capacity: usize,
+    /// OrderedQueue 的 receive_buffer 最大容量。
+    ///
+    /// 控制 drain channel 时最多缓冲多少个 Ordered<ReadDir> 结果。
+    /// 默认 256，足够处理正常乱序深度。
+    /// 旧版默认 4096，大目录下可能缓存数百 MB 数据。
+    max_receive_buffer_size: usize,
 }
 
 impl<C: ClientState> WalkDirGeneric<C> {
@@ -224,18 +287,23 @@ impl<C: ClientState> WalkDirGeneric<C> {
         WalkDirGeneric {
             root: root.as_ref().to_path_buf(),
             options: WalkDirOptions {
-                sort: false,
+            sort: false,
                 min_depth: 0,
-                max_depth: ::std::usize::MAX,
-                skip_hidden: true,
+                max_depth: usize::MAX,
+                skip_hidden: false,
                 follow_links: false,
                 read_metadata: false,
                 read_metadata_ext: false,
+                read_hardlink_info: false,
+                dir_entry_capacity: 512,
                 parallelism: Parallelism::RayonDefaultPool {
                     busy_timeout: std::time::Duration::from_secs(1),
                 },
                 root_read_dir_state: C::ReadDirState::default(),
                 process_read_dir: None,
+                max_retries: 3,
+                channel_capacity: 4096,
+                max_receive_buffer_size: 256,
             },
         }
     }
@@ -263,7 +331,7 @@ impl<C: ClientState> WalkDirGeneric<C> {
         self
     }
 
-    /// Skip hidden entries. Enabled by default.
+    /// Skip hidden entries. Disabled by default.
     pub fn skip_hidden(mut self, skip_hidden: bool) -> Self {
         self.options.skip_hidden = skip_hidden;
         self
@@ -335,6 +403,30 @@ impl<C: ClientState> WalkDirGeneric<C> {
         self
     }
 
+    /// 查询硬链接信息（NumberOfLinks + VolumeSerialNumber）。
+    ///
+    /// 启用后，Windows 路径会额外调用 `NtQueryInformationByName` (class 68)
+    /// 获取每个条目的 `number_of_links`，以及 `GetVolumeInformationByHandleW`
+    /// 获取 `volume_serial_number`。对于大目录（10K+ 条目），这会增加显著开销。
+    ///
+    /// 仅在 `read_metadata_ext(true)` 时生效。默认 `false`。
+    pub fn read_hardlink_info(mut self, read_hardlink_info: bool) -> Self {
+        self.options.read_hardlink_info = read_hardlink_info;
+        self
+    }
+
+    /// Set the pre-allocated capacity for the directory entry result vector.
+    ///
+    /// This controls the initial `Vec::with_capacity()` used when enumerating
+    /// directory entries via the NT Native API (Windows only). For directories
+    /// with many files (e.g. 10000+), increasing this value reduces Vec
+    /// re-allocations. For small directories, decreasing it saves memory.
+    /// Defaults to `512`.
+    pub fn dir_entry_capacity(mut self, capacity: usize) -> Self {
+        self.options.dir_entry_capacity = capacity;
+        self
+    }
+
     /// Degree of parallelism to use when performing walk. Defaults to
     /// [`Parallelism::RayonDefaultPool`](enum.Parallelism.html#variant.RayonDefaultPool).
     pub fn parallelism(mut self, parallelism: Parallelism) -> Self {
@@ -367,6 +459,51 @@ impl<C: ClientState> WalkDirGeneric<C> {
         self.options.process_read_dir = Some(Arc::new(process_by));
         self
     }
+
+    /// 设置 I/O 操作遇到临时错误时的最大重试次数。
+    ///
+    /// 默认值为 3。设为 0 则不重试（保持旧行为）。
+    ///
+    /// 可重试的临时错误包括（不限于）：
+    /// - **Windows**: `ERROR_SHARING_VIOLATION`(32)、`ERROR_LOCK_VIOLATION`(33)、
+    ///   `ERROR_NETWORK_BUSY`(54)、`ERROR_SEM_TIMEOUT`(121)、`ERROR_RETRY`(1237)
+    /// - **Unix**: `EAGAIN`(11)、`EBUSY`(16)、`ESTALE`(150)
+    /// - **通用**: `TimedOut`、`Interrupted`、`WouldBlock`、`ConnectionReset`、`ConnectionAborted`
+    ///
+    /// 重试时使用 `yield_now()` 让出 CPU，不阻塞工作线程。
+    pub fn max_retries(mut self, n: u8) -> Self {
+        self.options.max_retries = n;
+        self
+    }
+
+    /// 设置内部 channel 容量（PriorityQueue + OrderedQueue 共用）。
+    ///
+    /// crossbeam `bounded(N)` 创建时预分配 N 个 Slot（每个约 128-136 字节）。
+    /// 默认 4096（约 0.5MB/channel），足以保持流水线满载。
+    ///
+    /// **内存影响**：2 个 channel × N × 136B，即 `channel_capacity × 272B`。
+    /// - 4096（默认）→ 约 1MB
+    /// - 524288（旧版）→ 约 136MB
+    ///
+    /// **性能影响**：过小会导致生产者短暂阻塞，但对吞吐量影响极小（< 2%）。
+    pub fn channel_capacity(mut self, capacity: usize) -> Self {
+        self.options.channel_capacity = capacity;
+        self
+    }
+
+    /// 设置 OrderedQueue 的 receive_buffer 最大容量。
+    ///
+    /// 控制从 channel drain 时最多缓冲多少个目录结果。
+    /// 默认 256，足够处理正常乱序深度。
+    ///
+    /// **内存影响**：每个缓冲项持有一个目录的所有文件条目，
+    /// 即 `max_receive_buffer_size × 平均每目录条目数 × DirEntry 大小`。
+    /// - 256（默认）→ 数十 MB
+    /// - 4096（旧版）→ 可能数百 MB
+    pub fn max_receive_buffer_size(mut self, size: usize) -> Self {
+        self.options.max_receive_buffer_size = size;
+        self
+    }
 }
 
 fn process_dir_entry_result<C: ClientState>(
@@ -379,16 +516,13 @@ fn process_dir_entry_result<C: ClientState>(
                 dir_entry = dir_entry.follow_symlink()?;
             }
 
-            if dir_entry.depth == 0 && dir_entry.file_type.is_symlink() {
-                // As a special case, if we are processing a root entry, then we
-                // always follow it even if it's a symlink and follow_links is
-                // false. We are careful to not let this change the semantics of
-                // the DirEntry however. Namely, the DirEntry should still
-                // respect the follow_links setting. When it's disabled, it
-                // should report itself as a symlink. When it's enabled, it
-                // should always report itself as the target.
+            // 当 follow_links=false 且根条目是符号链接时，
+            // from_path 使用 symlink_metadata（不 follow），file_type 是 symlink。
+            // 需要额外 stat 判断目标是否是目录以设置 read_children_path。
+            // 当 follow_links=true 时，follow_symlink 已处理，此处无需额外 stat。
+            if !follow_links && dir_entry.depth == 0 && dir_entry.file_type.is_symlink() {
                 let metadata = fs::metadata(dir_entry.path())
-                    .map_err(|err| Error::from_path(0, dir_entry.path(), err))?;
+                    .map_err(|err| Error::from_path(0, dir_entry.path().to_owned(), err))?;
                 if metadata.file_type().is_dir() {
                     dir_entry.read_children_path = Some(Arc::from(dir_entry.path()));
                 }
@@ -413,12 +547,19 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
         let follow_links = self.options.follow_links;
         let read_metadata = self.options.read_metadata;
         let read_metadata_ext = self.options.read_metadata_ext;
-        let process_read_dir = self.options.process_read_dir.clone();
+        let read_hardlink_info = self.options.read_hardlink_info;
+        let dir_entry_capacity = self.options.dir_entry_capacity;
+        let max_retries = self.options.max_retries;
+        let channel_capacity = self.options.channel_capacity;
+        let max_receive_buffer_size = self.options.max_receive_buffer_size;
+        let process_read_dir = self.options.process_read_dir;
         let mut root_read_dir_state = self.options.root_read_dir_state;
-        let follow_link_ancestors = if follow_links {
-            Arc::new(vec![Arc::from(self.root.clone()) as Arc<Path>])
+        let follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>> = if follow_links {
+            // 根条目的 identity 在 from_path 中已 stat，这里预计算
+            AncestorIdentity::from_path(Arc::from(self.root.as_path()))
+                .map(|id| Arc::new(vec![id]))
         } else {
-            Arc::new(vec![])
+            None
         };
 
         let root_entry = DirEntry::from_path(
@@ -448,113 +589,86 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
             parallelism,
             min_depth,
             root_read_dir_state,
-            Arc::new(move |read_dir_spec| {
+            Arc::new(move |read_dir_spec, streaming_ctx| {
                 let ReadDirSpec {
                     path,
                     depth,
-                    mut client_read_state,
+                    client_read_state,
                     mut follow_link_ancestors,
                 } = read_dir_spec;
 
                 let read_dir_depth = depth;
-                let read_dir_contents_depth = depth + 1;
+                // saturating_add 防止 depth=usize::MAX 时溢出
+                let read_dir_contents_depth = depth.saturating_add(1);
 
                 if read_dir_contents_depth > max_depth {
                     return Ok(ReadDir::new(client_read_state, Vec::new()));
                 }
 
                 follow_link_ancestors = if follow_links {
-                    let mut ancestors = Vec::with_capacity(follow_link_ancestors.len() + 1);
-                    ancestors.extend(follow_link_ancestors.iter().cloned());
-                    ancestors.push(path.clone());
-                    Arc::new(ancestors)
+                    let existing = follow_link_ancestors
+                        .as_ref()
+                        .map(|a| a.as_ref().as_slice())
+                        .unwrap_or(&[]);
+                    let mut ancestors = Vec::with_capacity(existing.len() + 1);
+                    ancestors.extend(existing.iter().cloned());
+                    // 预计算当前目录的 identity（1 次 stat），避免 follow_symlink 中 O(D) 次 stat
+                    if let Some(identity) = AncestorIdentity::from_path(path.clone()) {
+                        ancestors.push(identity);
+                    }
+                    Some(Arc::new(ancestors))
                 } else {
                     follow_link_ancestors
                 };
 
-                let mut dir_entry_results: Vec<_> = fs::read_dir(path.as_ref())
-                    .map_err(|err| Error::from_path(0, path.to_path_buf(), err))?
-                    .filter_map(|dir_entry_result| {
-                        let fs_dir_entry = match dir_entry_result {
-                            Ok(fs_dir_entry) => fs_dir_entry,
-                            Err(err) => {
-                                return Some(Err(Error::from_io(read_dir_contents_depth, err)))
-                            }
-                        };
-
-                        let mut entry_metadata = None;
-                        let mut entry_metadata_ext = None;
-                        if read_metadata {
-                            if let Ok(metadata) = fs_dir_entry.metadata() {
-                                entry_metadata = Some(MetaData {
-                                    is_dir: metadata.is_dir(),
-                                    is_file: metadata.is_file(),
-                                    is_symlink: metadata.is_symlink(),
-                                    size: metadata.len(),
-                                    created: metadata.created().ok(),
-                                    modified: metadata.modified().ok(),
-                                    accessed: metadata.accessed().ok(),
-                                    permissions: Some(metadata.permissions()),
-                                });
-                            } else if let Ok(file_type) = fs_dir_entry.file_type() {
-                                entry_metadata = Some(MetaData {
-                                    is_dir: file_type.is_dir(),
-                                    is_file: file_type.is_file(),
-                                    is_symlink: file_type.is_symlink(),
-                                    size: 0,
-                                    created: None,
-                                    modified: None,
-                                    accessed: None,
-                                    permissions: None,
-                                });
-                            }
-                            if read_metadata_ext {
-                                if let Ok(metadata) = fs::metadata(fs_dir_entry.path()) {
-                                    entry_metadata_ext = Some(get_metadata_ext(&metadata));
-                                }
-                            }
-                        }
-
-                        let dir_entry = match DirEntry::from_entry(
-                            read_dir_contents_depth,
+                #[cfg(windows)]
+                {
+                    let mut streaming_ctx = streaming_ctx;
+                    retry_transient_io(max_retries, || {
+                        read_dir_windows(
                             path.clone(),
-                            entry_metadata,
-                            entry_metadata_ext,
-                            &fs_dir_entry,
+                            read_dir_depth,
+                            read_dir_contents_depth,
+                            follow_links,
+                            read_metadata,
+                            read_metadata_ext,
+                            read_hardlink_info,
+                            dir_entry_capacity,
+                            skip_hidden,
+                            sort,
                             follow_link_ancestors.clone(),
-                        ) {
-                            Ok(dir_entry) => dir_entry,
-                            Err(err) => return Some(Err(err)),
-                        };
-
-                        if skip_hidden && is_hidden(&dir_entry.file_name) {
-                            return None;
-                        }
-
-                        Some(process_dir_entry_result(Ok(dir_entry), follow_links))
+                            client_read_state.clone(),
+                            process_read_dir.as_ref(),
+                            streaming_ctx.take(),
+                        )
                     })
-                    .collect();
-
-                if sort {
-                    dir_entry_results.sort_by(|a, b| match (a, b) {
-                        (Ok(a), Ok(b)) => a.file_name.cmp(&b.file_name),
-                        (Ok(_), Err(_)) => Ordering::Less,
-                        (Err(_), Ok(_)) => Ordering::Greater,
-                        (Err(_), Err(_)) => Ordering::Equal,
-                    });
                 }
 
-                if let Some(process_read_dir) = process_read_dir.as_ref() {
-                    process_read_dir(
-                        Some(read_dir_depth),
-                        path.as_ref(),
-                        &mut client_read_state,
-                        &mut dir_entry_results,
-                    );
+                #[cfg(not(windows))]
+                {
+                    let mut streaming_ctx = streaming_ctx;
+                    retry_transient_io(max_retries, || {
+                        read_dir_unix(
+                            path.clone(),
+                            read_dir_depth,
+                            read_dir_contents_depth,
+                            follow_links,
+                            read_metadata,
+                            read_metadata_ext,
+                            read_hardlink_info,
+                            skip_hidden,
+                            sort,
+                            follow_link_ancestors.clone(),
+                            client_read_state.clone(),
+                            process_read_dir.as_ref(),
+                            streaming_ctx.take(),
+                            dir_entry_capacity,
+                        )
+                    })
                 }
-
-                Ok(ReadDir::new(client_read_state, dir_entry_results))
             }),
+            channel_capacity,
+            max_receive_buffer_size,
         )
     }
 }
@@ -562,16 +676,21 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
 impl<C: ClientState> Clone for WalkDirOptions<C> {
     fn clone(&self) -> WalkDirOptions<C> {
         WalkDirOptions {
-            sort: false,
+            sort: self.sort,
             min_depth: self.min_depth,
             max_depth: self.max_depth,
             skip_hidden: self.skip_hidden,
             follow_links: self.follow_links,
             read_metadata: self.read_metadata,
             read_metadata_ext: self.read_metadata_ext,
+            read_hardlink_info: self.read_hardlink_info,
+            dir_entry_capacity: self.dir_entry_capacity,
             parallelism: self.parallelism.clone(),
             root_read_dir_state: self.root_read_dir_state.clone(),
             process_read_dir: self.process_read_dir.clone(),
+            max_retries: self.max_retries,
+            channel_capacity: self.channel_capacity,
+            max_receive_buffer_size: self.max_receive_buffer_size,
         }
     }
 }
@@ -585,15 +704,28 @@ impl Parallelism {
             Parallelism::Serial => op(),
             Parallelism::RayonDefaultPool { .. } => rayon::spawn(op),
             Parallelism::RayonNewPool(num_threads) => {
-                let mut thread_pool = ThreadPoolBuilder::new();
-                if *num_threads > 0 {
-                    thread_pool = thread_pool.num_threads(*num_threads);
+                // TLS 线程池复用：同一线程内所有 WalkDir 实例共享同一个
+                // ThreadPool，避免频繁创建/销毁线程池的开销。
+                // 线程池随宿主线程生命周期销毁，rayon::ThreadPool::drop 会
+                // 等待所有工作线程完成后才释放资源。
+                thread_local! {
+                    static TLS_POOL: std::cell::RefCell<Option<rayon::ThreadPool>> = std::cell::RefCell::new(None);
                 }
-                if let Ok(thread_pool) = thread_pool.build() {
-                    thread_pool.spawn(op);
-                } else {
-                    rayon::spawn(op);
-                }
+                TLS_POOL.with(|cell| {
+                    let mut pool_opt = cell.borrow_mut();
+                    if pool_opt.is_none() {
+                        let mut builder = rayon::ThreadPoolBuilder::new();
+                        if *num_threads > 0 {
+                            builder = builder.num_threads(*num_threads);
+                        }
+                        *pool_opt = builder.build().ok();
+                    }
+                    if let Some(pool) = pool_opt.as_ref() {
+                        pool.spawn(op);
+                    } else {
+                        rayon::spawn(op);
+                    }
+                })
             }
             Parallelism::RayonExistingPool { pool, .. } => pool.spawn(op),
         }
@@ -608,11 +740,232 @@ impl Parallelism {
     }
 }
 
+/// 重试瞬时 I/O 错误。最多重试 max_retries 次，非首次重试前 yield_now 让出线程。
+/// 非瞬时错误或重试耗尽后立即返回。
+fn retry_transient_io<T>(
+    max_retries: u8,
+    mut op: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    for attempt in 0..=max_retries {
+        match op() {
+            Ok(result) => return Ok(result),
+            Err(e) => {
+                if attempt < max_retries && is_transient_error(&e) {
+                    if attempt > 0 {
+                        std::thread::yield_now();
+                    }
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
+    // 循环必然通过 return 退出：
+    // - max_retries=0：循环 1 次，失败后 attempt<max_retries=false → return Err
+    // - max_retries>0：最后一次 attempt=max_retries 失败 → return Err
+    unreachable!("retry loop exits via return, not fallthrough")
+}
+
+/// 按文件名对 DirEntry 结果排序。Ok 在 Err 前，Err 之间保持稳定。
+fn sort_dir_entries_by_name<C: ClientState>(
+    entries: &mut [Result<DirEntry<C>>],
+) {
+    entries.sort_unstable_by(|a, b| match (a, b) {
+        (Ok(a), Ok(b)) => a.file_name.cmp(&b.file_name),
+        (Ok(_), Err(_)) => Ordering::Less,
+        (Err(_), Ok(_)) => Ordering::Greater,
+        (Err(_), Err(_)) => Ordering::Equal,
+    });
+}
+
+#[cfg(not(windows))]
 fn is_hidden(file_name: &OsStr) -> bool {
-    file_name
-        .to_str()
-        .map(|s| s.starts_with('.'))
-        .unwrap_or(false)
+    file_name.as_encoded_bytes().first() == Some(&b'.')
+}
+
+#[cfg(windows)]
+fn is_hidden(file_name: &OsStr) -> bool {
+    file_name.as_encoded_bytes().first() == Some(&b'.')
+}
+
+/// Windows 文件属性常量
+#[cfg(windows)]
+mod win32_attrs {
+    /// 目录属性位
+    pub const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    /// 符号链接/重解析点属性位
+    pub const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    /// 隐藏文件属性位
+    pub const FILE_ATTRIBUTE_HIDDEN: u32 = 0x2;
+}
+
+/// Windows 扩展版 is_hidden：同时检查 dot 前缀和 FILE_ATTRIBUTE_HIDDEN 属性位。
+#[cfg(windows)]
+fn is_hidden_win32(file_name: &OsStr, file_attributes: u32) -> bool {
+    if file_attributes & win32_attrs::FILE_ATTRIBUTE_HIDDEN != 0 {
+        return true;
+    }
+    is_hidden(file_name)
+}
+
+// ── Windows NT fast-path 辅助函数 ─────────────────────────────────────
+
+#[cfg(windows)]
+mod read_dir_windows_helpers {
+    use super::*;
+    use crate::core::DirEntryInfo;
+
+    // Windows FILETIME epoch (1601-01-01) to UNIX epoch offset in 100ns ticks
+    pub(super) const EPOCH_DIFFERENCE_100NS: i64 = 116_444_736_000_000_000;
+    /// 100-ns ticks per second (FILETIME precision)
+    pub(super) const HUNDRED_NS_PER_SEC: i64 = 10_000_000;
+    /// Nanoseconds per 100-ns tick
+    pub(super) const NS_PER_HUNDRED_NS: i64 = 100;
+
+    /// 将 Windows FILETIME (100-ns ticks since 1601) 转为 SystemTime
+    pub(super) fn filetime_to_systemtime(ft: i64) -> Option<std::time::SystemTime> {
+        if ft == 0 { return None; }
+        let duration_100ns = ft.saturating_sub(EPOCH_DIFFERENCE_100NS);
+        if duration_100ns < 0 { return None; }
+        let secs = (duration_100ns / HUNDRED_NS_PER_SEC) as u64;
+        let nanos = ((duration_100ns % HUNDRED_NS_PER_SEC) * NS_PER_HUNDRED_NS) as u32;
+        Some(std::time::UNIX_EPOCH + std::time::Duration::new(secs, nanos))
+    }
+
+    /// 从 file_attributes (u32) 构造 std::fs::FileType
+    ///
+    /// SAFETY: 此 transmute 依赖 std::fs::FileType 在 Windows 上的内部布局
+    /// `{ is_directory: bool, is_symlink: bool }`（即 `[bool; 2]`）。
+    ///
+    /// **不可替代性**：std::fs::FileType 没有公开构造函数。NT fast path 只有
+    /// dwFileAttributes，无法通过 `fs::metadata()` 获取 FileType 而不引入额外
+    /// syscall（抵消 NT API 的性能优势）。
+    ///
+    /// **防护层**：
+    /// 1. 编译期 size_of 断言（布局 size 变化即编译失败）
+    /// 2. debug 模式运行时 self-test（字段位置变化即 panic）
+    /// 3. 仅在构造 DirEntry.file_type（pub 字段）时调用；
+    ///    make_metadata 已改为直接用 bool，不走此路径
+    ///
+    /// **升级路径**：若 std 未来提供 `FileType::from_bits(u16)` 或稳定
+    /// `From<dwFileAttributes>`，替换此处 transmute。
+    pub(super) fn file_type_from_attrs(attrs: u32) -> std::fs::FileType {
+        const _: () = assert!(
+            std::mem::size_of::<std::fs::FileType>() == std::mem::size_of::<u16>(),
+            "FileType layout assumption violated: expected 2 bytes"
+        );
+        let is_dir = (attrs & win32_attrs::FILE_ATTRIBUTE_DIRECTORY) != 0;
+        let is_sym = (attrs & win32_attrs::FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        let bits: u16 = (is_dir as u16) | ((is_sym as u16) << 8);
+        // debug 模式验证字段位置假设（byte 0 = is_dir, byte 8 = is_symlink）
+        #[cfg(debug_assertions)]
+        {
+            let test_dir: std::fs::FileType = unsafe { std::mem::transmute(1u16) };
+            debug_assert!(test_dir.is_dir() && !test_dir.is_symlink(),
+                "FileType layout drift: bit 0 no longer maps to is_directory");
+            let test_sym: std::fs::FileType = unsafe { std::mem::transmute(256u16) };
+            debug_assert!(!test_sym.is_dir() && test_sym.is_symlink(),
+                "FileType layout drift: bit 8 no longer maps to is_symlink");
+        }
+        unsafe { std::mem::transmute(bits) }
+    }
+
+    /// 从 DirEntryInfo 构造 MetaData。
+    ///
+    /// 直接从 dwFileAttributes 计算 is_dir/is_symlink，不经 transmute 路径，
+    /// 消除热路径上的 UB 依赖。
+    pub(super) fn make_metadata(info: &DirEntryInfo) -> MetaData {
+        let is_dir = (info.file_attributes & win32_attrs::FILE_ATTRIBUTE_DIRECTORY) != 0;
+        let is_symlink = (info.file_attributes & win32_attrs::FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+        MetaData {
+            is_dir,
+            is_file: !is_dir && !is_symlink,
+            is_symlink,
+            size: info.file_size,
+            // Windows creation_time is both birth time and (Python-mirrored) st_ctime.
+            created: filetime_to_systemtime(info.creation_time),
+            changed: filetime_to_systemtime(info.creation_time),
+            modified: filetime_to_systemtime(info.last_write_time),
+            accessed: filetime_to_systemtime(info.last_access_time),
+            permissions: None, // NT fast path 不获取权限信息
+        }
+    }
+
+    /// 从 DirEntryInfo 构造 MetaDataExt。
+    ///
+    /// 优先使用 DirEntryInfo 中预计算的 number_of_links 和 volume_serial_number
+    /// （由 NtQueryInformationByName + FileStatInformation 批量查询填充）。
+    /// 当预计算值不可用时（老 Windows 或查询失败），使用 Win32 fallback 路径。
+    /// 仅在 read_hardlink_info=true 时触发 fallback（需要额外 fs::symlink_metadata）。
+    pub(super) fn make_metadata_ext(
+        info: &DirEntryInfo,
+        win32_fallback_path: Option<&Path>,
+        read_hardlink_info: bool,
+    ) -> MetaDataExt {
+        // 优先使用 NT API 批量查询的预计算值
+        // P4: 当任一预计算值缺失时，只调用1次 symlink_metadata（之前调用2次）
+        // 仅 read_hardlink_info=true 时触发 fallback（需要额外 syscall）
+        let (number_of_links, volume_serial_number) = {
+            let need_nlink = read_hardlink_info && info.number_of_links.is_none();
+            let need_vol = read_hardlink_info && info.volume_serial_number.is_none();
+            if need_nlink || need_vol {
+                if let Some(path) = win32_fallback_path {
+                    if let Ok(m) = std::fs::symlink_metadata(path) {
+                        let ext = crate::core::get_metadata_ext(&m);
+                        (
+                            info.number_of_links.or(ext.number_of_links),
+                            info.volume_serial_number.or(ext.volume_serial_number),
+                        )
+                    } else {
+                        (info.number_of_links, info.volume_serial_number)
+                    }
+                } else {
+                    (info.number_of_links, info.volume_serial_number)
+                }
+            } else {
+                (info.number_of_links, info.volume_serial_number)
+            }
+        };
+
+MetaDataExt {
+            file_attributes: info.file_attributes,
+            volume_serial_number,
+            number_of_links,
+            file_index: Some(info.file_id),
+        }
+    }
+
+    /// 从 DirEntryInfo 构造 DirEntry
+    pub(super) fn make_dir_entry<C: ClientState>(
+        info: DirEntryInfo,
+        depth: usize,
+        parent_path: Arc<Path>,
+        read_metadata: bool,
+        read_metadata_ext: bool,
+        read_hardlink_info: bool,
+    follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
+    ) -> Result<DirEntry<C>> {
+        let entry_metadata = if read_metadata {
+            Some(make_metadata(&info))
+        } else {
+            None
+        };
+        let entry_metadata_ext = if read_metadata_ext {
+            Some(make_metadata_ext(&info, None, read_hardlink_info))
+        } else {
+            None
+        };
+        let file_type = file_type_from_attrs(info.file_attributes);
+        DirEntry::from_raw(
+            depth,
+            parent_path,
+            entry_metadata,
+            entry_metadata_ext,
+            info.file_name,
+            file_type,
+            follow_link_ancestors,
+        )
+    }
 }
 
 impl<B, E> ClientState for (B, E)
@@ -622,4 +975,796 @@ where
 {
     type ReadDirState = B;
     type DirEntryState = E;
+}
+
+// ── 平台特定的 read_dir 实现 ─────────────────────────────────────────
+
+/// Windows NT Native API fast path：使用 NtQueryDirectoryFileEx 枚举目录。
+///
+/// 支持流式子目录分发（streaming）和常规批量枚举两种模式。
+#[cfg(windows)]
+fn read_dir_windows<C: ClientState>(
+    path: Arc<Path>,
+    read_dir_depth: usize,
+    read_dir_contents_depth: usize,
+    follow_links: bool,
+    read_metadata: bool,
+    read_metadata_ext: bool,
+    read_hardlink_info: bool,
+    dir_entry_capacity: usize,
+    skip_hidden: bool,
+    sort: bool,
+    follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
+    mut client_read_state: C::ReadDirState,
+    process_read_dir: Option<&Arc<ProcessReadDirFunction<C>>>,
+    streaming_ctx: Option<crate::core::StreamingContext<C>>,
+) -> Result<ReadDir<C>> {
+    use crate::core::{enumerate_dir, enumerate_dir_streaming, batch_query_nlinks, detect_fs_type_and_vol_serial};
+    use read_dir_windows_helpers::*;
+
+    // 选择枚举策略：流式 vs 非流式
+    let use_streaming = streaming_ctx.is_some() && !sort && process_read_dir.is_none();
+
+    // Cell<usize> 允许闭包内修改，不受 Copy 语义影响
+    let streamed_count = std::cell::Cell::new(0usize);
+
+    let entries_result = if use_streaming {
+        // ── 流式分发路径 ──
+        // 准备 IndexPath：克隆基路径并 push(0)，回调中递增最后一个元素
+        let mut child_index_path = streaming_ctx.as_ref().unwrap().index_path.clone();
+        child_index_path.indices.push(0);
+
+        let ctx = streaming_ctx.as_ref().unwrap();
+
+        // 优先淹没算法：weight = parent_weight + subdir_count
+        // parent_weight 继承父目录权重（大管道的分支也是大管道）
+        // subdir_count 递增确保子目录越多的父目录权重越高
+        let parent_weight = ctx.parent_weight;
+
+        enumerate_dir_streaming(path.as_ref(), dir_entry_capacity, |dir_info| {
+            // 检查停止标志 — 如果遍历被取消则立即退出
+            if ctx.is_stopped() {
+                return;
+            }
+
+            // 跳过隐藏目录
+            if skip_hidden && is_hidden_win32(&dir_info.file_name, dir_info.file_attributes) {
+                return;
+            }
+
+            // 检查是否为目录
+            if dir_info.file_attributes & win32_attrs::FILE_ATTRIBUTE_DIRECTORY == 0 {
+                return; // 只分发子目录
+            }
+
+            let child_path: Arc<Path> = Arc::from(
+                path.join(&dir_info.file_name)
+            );
+            let spec = ReadDirSpec {
+                depth: read_dir_contents_depth,
+                path: child_path,
+                client_read_state: client_read_state.clone(),
+                follow_link_ancestors: follow_link_ancestors.clone(),
+            };
+
+        // 优先淹没算法：流式路径统一权重 = parent_weight + 1
+        // 所有流式子目录 weight 相同，BinaryHeap 用 IndexPath tiebreak（反向 Ord）
+        // → IndexPath 小的先出 → 先发现先调度（与 OrderedQueue DFS 输出序一致）
+        //
+        // BUG 修复：原 streamed_count+1 递增导致 max-heap 下"后发现先调度"，
+        // 与注释意图相反，且与非流式路径（pipe_size 统一）行为不一致。
+        // 非流式路径(read_dir.rs)仍用 parent_weight + pipe_size（父目录总条目数），
+        // 权重继承确保大管道的分支也获得高优先级。
+        let weight = parent_weight.saturating_add(1);
+            if let Some(last) = child_index_path.indices.last_mut() {
+                *last = streamed_count.get();
+            }
+            if ctx.schedule(Weighted::new(spec, child_index_path.clone(), weight)) {
+                streamed_count.set(streamed_count.get() + 1);
+            }
+        })
+    } else {
+        // ── 非流式路径 ──
+        enumerate_dir(path.as_ref(), dir_entry_capacity)
+    };
+
+    let streamed_child_count = streamed_count.get();
+
+    let (guard, mut entries) = match entries_result {
+        Ok((guard, entries)) => (guard, entries),
+        Err(err) => {
+            // 如果流式枚举在出错前已调度了子目录，必须报告已调度数量，
+            // 否则 OrderedMatcher 的 DFS 序与实际产出不匹配，消费者会卡在
+            // looking_for 永远等不到的子目录上。返回包含错误 DirEntry 的 ReadDir，
+            // 携带正确的 streamed_child_count 让上层推进 matcher。
+            if streamed_child_count > 0 {
+                let mut read_dir = ReadDir::new(client_read_state, vec![Err(Error::from_path(0, path.to_path_buf(), err))]);
+                read_dir.streamed_child_count = streamed_child_count;
+                return Ok(read_dir);
+            }
+            return Err(Error::from_path(0, path.to_path_buf(), err));
+        }
+    };
+
+    // 批量查询硬链接信息：NumberOfLinks + VolumeSerialNumber
+    // 仅在 read_metadata_ext + read_hardlink_info 时触发，避免 O(N) syscall 开销
+    if read_metadata_ext && read_hardlink_info {
+        // 一次 GetVolumeInformationByHandleW 同时获取 fs_type + vol_serial
+        let (fs_type, vol_serial) = detect_fs_type_and_vol_serial(&guard);
+        // 检测文件系统类型：FAT32/exFAT 不支持硬链接，NumberOfLinks 恒为 1
+        // 跳过逐文件 NtQueryInformationByName 查询，节省 N 次 syscall
+        if fs_type.is_fat_family() {
+            for entry in entries.iter_mut() {
+                entry.number_of_links = Some(1);
+            }
+        } else {
+            batch_query_nlinks(&mut entries, &guard, read_hardlink_info); // read_hardlink_info=true 时也查询文件 nlink
+        }
+        if let Some(vs) = vol_serial {
+            for entry in entries.iter_mut() {
+                entry.volume_serial_number = Some(vs);
+            }
+        }
+    }
+    drop(guard); // 尽早关闭目录句柄，释放内核资源
+
+    // 构造 DirEntry 列表
+    let mut dir_entry_results: Vec<_> = entries
+        .into_iter()
+        .filter_map(|info| {
+            if skip_hidden && is_hidden_win32(&info.file_name, info.file_attributes) {
+                return None;
+            }
+
+            let dir_entry = match make_dir_entry(
+                info,
+                read_dir_contents_depth,
+                path.clone(),
+                read_metadata,
+                read_metadata_ext,
+                read_hardlink_info,
+                follow_link_ancestors.clone(),
+            ) {
+                Ok(e) => e,
+                Err(err) => return Some(Err(err)),
+            };
+
+            Some(process_dir_entry_result(Ok(dir_entry), follow_links))
+        })
+        .collect();
+
+    if sort {
+        sort_dir_entries_by_name(&mut dir_entry_results);
+    }
+
+    if let Some(process_read_dir) = process_read_dir {
+        process_read_dir(
+            Some(read_dir_depth),
+            path.as_ref(),
+            &mut client_read_state,
+            &mut dir_entry_results,
+        );
+    }
+
+    let mut read_dir = ReadDir::new(client_read_state, dir_entry_results);
+    read_dir.streamed_child_count = streamed_child_count;
+    Ok(read_dir)
+}
+
+// === Unix 目录枚举路径 ===
+
+/// Unix 目录枚举派发器。
+///
+/// - Linux：走 `read_dir_linux_via_getdents`（getdents64 直调 + fstatat + 可选流式分发）
+/// - 其他 Unix（macOS/BSD）：走 `read_dir_unix_fs_legacy`（std::fs::read_dir，流式不支持）
+#[cfg(not(windows))]
+fn read_dir_unix<C: ClientState>(
+    path: Arc<Path>,
+    read_dir_depth: usize,
+    read_dir_contents_depth: usize,
+    follow_links: bool,
+    read_metadata: bool,
+    read_metadata_ext: bool,
+    read_hardlink_info: bool,
+    skip_hidden: bool,
+    sort: bool,
+    follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
+    client_read_state: C::ReadDirState,
+    process_read_dir: Option<&Arc<ProcessReadDirFunction<C>>>,
+    streaming_ctx: Option<crate::core::StreamingContext<C>>,
+    dir_entry_capacity: usize,
+) -> Result<ReadDir<C>> {
+    // Linux + 未启用 legacy feature：走 getdents64 直调路径
+    #[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
+    {
+        return read_dir_linux_via_getdents(
+            path,
+            read_dir_depth,
+            read_dir_contents_depth,
+            follow_links,
+            read_metadata,
+            read_metadata_ext,
+            read_hardlink_info,
+            skip_hidden,
+            sort,
+            follow_link_ancestors,
+            client_read_state,
+            process_read_dir,
+            streaming_ctx,
+            dir_entry_capacity,
+        );
+    }
+
+    // 其他情况（非 Linux 或开启 legacy-read-dir feature）：保留 fs::read_dir 路径
+    #[cfg(any(not(target_os = "linux"), feature = "legacy-read-dir"))]
+    {
+        let _ = (streaming_ctx, dir_entry_capacity);
+        read_dir_unix_fs_legacy(
+            path,
+            read_dir_depth,
+            read_dir_contents_depth,
+            follow_links,
+            read_metadata,
+            read_metadata_ext,
+            read_hardlink_info,
+            skip_hidden,
+            sort,
+            follow_link_ancestors,
+            client_read_state,
+            process_read_dir,
+        )
+    }
+}
+
+/// macOS/其他 Unix 的 fallback 实现：使用 std::fs::read_dir 枚举目录。
+///
+/// 与原 read_dir_unix 行为完全一致；macOS 没有 getdents64（用 getdirentries64），
+/// 暂不实现流式分发，待后续 macOS 专用路径补齐。
+#[cfg(all(unix, any(not(target_os = "linux"), feature = "legacy-read-dir")))]
+fn read_dir_unix_fs_legacy<C: ClientState>(
+    path: Arc<Path>,
+    read_dir_depth: usize,
+    read_dir_contents_depth: usize,
+    follow_links: bool,
+    read_metadata: bool,
+    read_metadata_ext: bool,
+    _read_hardlink_info: bool,
+    skip_hidden: bool,
+    sort: bool,
+    follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
+    mut client_read_state: C::ReadDirState,
+    process_read_dir: Option<&Arc<ProcessReadDirFunction<C>>>,
+) -> Result<ReadDir<C>> {
+    let mut dir_entry_results: Vec<_> = fs::read_dir(path.as_ref())
+        .map_err(|err| Error::from_path(0, path.to_path_buf(), err))?
+        .filter_map(|dir_entry_result| {
+            let fs_dir_entry = match dir_entry_result {
+                Ok(fs_dir_entry) => fs_dir_entry,
+                Err(err) => {
+                    return Some(Err(Error::from_io(read_dir_contents_depth, err)))
+                }
+            };
+
+            let mut entry_metadata = None;
+            let mut entry_metadata_ext = None;
+            if read_metadata {
+                if let Ok(metadata) = fs_dir_entry.metadata() {
+                    if read_metadata_ext {
+                        entry_metadata_ext = Some(get_metadata_ext(&metadata));
+                    }
+                    entry_metadata = Some(MetaData::from_fs_metadata(&metadata));
+                } else if let Ok(file_type) = fs_dir_entry.file_type() {
+                    entry_metadata = Some(MetaData {
+                        is_dir: file_type.is_dir(),
+                        is_file: file_type.is_file(),
+                        is_symlink: file_type.is_symlink(),
+                        size: 0,
+                        created: None,
+                        changed: None,
+                        modified: None,
+                        accessed: None,
+                        permissions: None,
+                    });
+                } else {
+                    // metadata() and file_type() both failed — propagate error
+                    let path = fs_dir_entry.path();
+                    return Some(Err(Error::from_path(
+                        read_dir_contents_depth,
+                        path,
+                        std::io::Error::new(std::io::ErrorKind::Other, "failed to read metadata"),
+                    )));
+                }
+            } else if read_metadata_ext {
+                // P3: 使用 symlink_metadata 避免 follow symlink 的额外路径解析开销
+                if let Ok(metadata) = fs::symlink_metadata(fs_dir_entry.path()) {
+                    entry_metadata_ext = Some(get_metadata_ext(&metadata));
+                }
+            }
+
+            let dir_entry = match DirEntry::from_entry(
+                read_dir_contents_depth,
+                path.clone(),
+                entry_metadata,
+                entry_metadata_ext,
+                &fs_dir_entry,
+                follow_link_ancestors.clone(),
+            ) {
+                Ok(dir_entry) => dir_entry,
+                Err(err) => return Some(Err(err)),
+            };
+
+            if skip_hidden && is_hidden(&dir_entry.file_name) {
+                return None;
+            }
+
+            Some(process_dir_entry_result(Ok(dir_entry), follow_links))
+        })
+        .collect();
+
+    if sort {
+        sort_dir_entries_by_name(&mut dir_entry_results);
+    }
+
+    if let Some(process_read_dir) = process_read_dir {
+        process_read_dir(
+            Some(read_dir_depth),
+            path.as_ref(),
+            &mut client_read_state,
+            &mut dir_entry_results,
+        );
+    }
+
+    Ok(ReadDir::new(client_read_state, dir_entry_results))
+}
+
+/// Linux getdents64 直调路径：单次 syscall 批量获取条目，可选流式子目录分发。
+///
+/// 与 Windows 端 `read_dir_windows` 模式对齐：
+/// 1. `streaming_ctx.is_some() && !sort && process_read_dir.is_none()` → 流式路径
+/// 2. 否则走非流式 collect 路径
+/// 3. d_type 短路判断 FileType，避免 fstatat（DT_UNKNOWN 才 fallback）
+/// 4. fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW) 替代 fs::metadata，省路径解析
+#[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
+fn read_dir_linux_via_getdents<C: ClientState>(
+    path: Arc<Path>,
+    read_dir_depth: usize,
+    read_dir_contents_depth: usize,
+    follow_links: bool,
+    read_metadata: bool,
+    read_metadata_ext: bool,
+    _read_hardlink_info: bool,
+    skip_hidden: bool,
+    sort: bool,
+    follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
+    mut client_read_state: C::ReadDirState,
+    process_read_dir: Option<&Arc<ProcessReadDirFunction<C>>>,
+    streaming_ctx: Option<crate::core::StreamingContext<C>>,
+    dir_entry_capacity: usize,
+) -> Result<ReadDir<C>> {
+    use crate::core::unix_dir_enum::{self, DirFdGuard, LinuxDirEntryOwned};
+    use std::cell::Cell;
+
+    let use_streaming = streaming_ctx.is_some() && !sort && process_read_dir.is_none();
+    let streamed_count = Cell::new(0usize);
+
+    let entries_result: std::io::Result<(DirFdGuard, Vec<LinuxDirEntryOwned>)> = if use_streaming {
+        let ctx = streaming_ctx.unwrap();
+        let parent_weight = ctx.parent_weight;
+        let mut child_index_path = ctx.index_path.clone();
+        child_index_path.indices.push(0);
+
+        // 流式分发：每个子目录立即 schedule，与 Windows 端 enumerate_dir_streaming 模式对齐
+        // 优先淹没算法：流式路径统一 weight = parent_weight + 1
+        //   - 所有流式子目录 weight 相同，BinaryHeap 用 IndexPath tiebreak（反向 Ord）
+        //   - IndexPath 小的先出 → 先发现先调度 → 与 OrderedQueue DFS 输出序一致
+        unix_dir_enum::enumerate_dir_unix_streaming(path.as_ref(), dir_entry_capacity, |info| {
+            if ctx.is_stopped() {
+                return;
+            }
+            // 只调度子目录（与 Windows 端 FILE_ATTRIBUTE_DIRECTORY 过滤对齐）
+            if info.d_type != libc::DT_DIR {
+                return;
+            }
+            if skip_hidden && is_hidden(&info.name) {
+                return;
+            }
+
+            let child_path: Arc<Path> = Arc::from(path.join(&info.name));
+            let spec = ReadDirSpec {
+                depth: read_dir_contents_depth,
+                path: child_path,
+                client_read_state: client_read_state.clone(),
+                follow_link_ancestors: follow_link_ancestors.clone(),
+            };
+
+            // 流式路径统一权重：避免递增 max-heap 下"后发现先调度"BUG
+            let weight = parent_weight.saturating_add(1);
+
+            // IndexPath 序号管理：每个 schedule 用 streamed_count 当前值作 last，
+            // schedule 成功后递增（与 Windows 端模式严格一致，保 OrderedMatcher DFS 序）
+            if let Some(last) = child_index_path.indices.last_mut() {
+                *last = streamed_count.get();
+            }
+            if ctx.schedule(Weighted::new(spec, child_index_path.clone(), weight)) {
+                streamed_count.set(streamed_count.get() + 1);
+            }
+        })
+    } else {
+        unix_dir_enum::enumerate_dir_unix(path.as_ref(), dir_entry_capacity)
+    };
+
+    let streamed_child_count = streamed_count.get();
+
+    let (guard, mut entries) = match entries_result {
+        Ok((guard, entries)) => (guard, entries),
+        Err(err) => {
+            // 流式枚举在出错前已调度了子目录时，必须报告已调度数量，
+            // 否则 OrderedMatcher 的 DFS 序与实际产出不匹配，消费者会卡死。
+            if streamed_child_count > 0 {
+                let mut read_dir = ReadDir::new(
+                    client_read_state,
+                    vec![Err(Error::from_path(0, path.to_path_buf(), err))],
+                );
+                read_dir.streamed_child_count = streamed_child_count;
+                return Ok(read_dir);
+            }
+            return Err(Error::from_path(0, path.to_path_buf(), err));
+        }
+    };
+
+    // DirEntry 构造：d_type 短路判断类型，read_metadata/read_metadata_ext/DT_UNKNOWN 触发 fstatat
+    let dirfd = guard.as_raw_fd();
+
+    // ── io_uring 批量 STATX 派发（NetworkAsync 路径）───────────────────────────
+    // 仅对网络挂载（SMB/NFS/CIFS）启用：单次 submit_and_wait 批量获取 statx，
+    // 替代 N 次 per-entry fstatat。本地路径（LocalSync）走下方 fstatat 路径不变。
+    // 历史教训：NTFS MFT 卷级锁让多线程变慢（5367f20 回档），本地 FS 不启用 io_uring。
+    #[cfg(all(
+        target_os = "linux",
+        target_env = "gnu",
+        any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "loongarch64",
+            target_arch = "powerpc64",
+        ),
+    ))]
+    // io-uring 0.7.x 预编译 sys.rs 白名单（上游 src/sys/mod.rs:18-33）：非白名单架构此块整体跳过，
+    // 不引用 linux_io_uring 模块任何符号（unresolved module 会编译失败）。
+    {
+        use crate::core::fs_detect::IoStrategy;
+        let strategy = IO_STRATEGY_CACHE.with(|c| c.borrow_mut().detect(path.as_ref()));
+        let need_meta_or_type = read_metadata
+            || read_metadata_ext
+            || entries.iter().any(|e| e.d_type == libc::DT_UNKNOWN);
+        if strategy == IoStrategy::NetworkAsync
+            && crate::core::linux_io_uring::io_uring_enabled()
+            && need_meta_or_type
+            && entries.len() >= crate::core::linux_io_uring::MIN_BATCH_FOR_IO_URING
+        {
+            // 静默 fallback：ring 不可用或 CQE 失败 → entries[i].statx 保持 None，
+            // 静默 fallback：ring 不可用或 CQE 失败 → entries[i].statx 保持 None，
+            // make_dir_entry_linux 自动降级到 per-entry fstatat（行为与 LocalSync 一致）。
+            let _ = crate::core::linux_io_uring::batch_statx_via_io_uring(&mut entries, dirfd);
+        }
+    }
+
+    let mut dir_entry_results: Vec<_> = entries
+        .into_iter()
+        .filter_map(|info| {
+            if skip_hidden && is_hidden(&info.name) {
+                return None;
+            }
+
+            let dir_entry = match make_dir_entry_linux(
+                info,
+                read_dir_contents_depth,
+                path.clone(),
+                read_metadata,
+                read_metadata_ext,
+                dirfd,
+                follow_link_ancestors.clone(),
+            ) {
+                Ok(e) => e,
+                Err(err) => return Some(Err(err)),
+            };
+
+            Some(process_dir_entry_result(Ok(dir_entry), follow_links))
+        })
+        .collect();
+
+    drop(guard); // 尽早关闭目录 fd，释放内核资源
+
+    if sort {
+        sort_dir_entries_by_name(&mut dir_entry_results);
+    }
+
+    if let Some(process_read_dir) = process_read_dir {
+        process_read_dir(
+            Some(read_dir_depth),
+            path.as_ref(),
+            &mut client_read_state,
+            &mut dir_entry_results,
+        );
+    }
+
+    let mut read_dir = ReadDir::new(client_read_state, dir_entry_results);
+    read_dir.streamed_child_count = streamed_child_count;
+    Ok(read_dir)
+}
+
+/// 从 LinuxDirEntryOwned 构造 DirEntry（Linux getdents64 路径专用）。
+///
+/// 元数据获取优先级：
+/// 1. `info.statx`（io_uring 批量 STATX 预取，NetworkAsync 路径）
+/// 2. `fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)`（LocalSync / io_uring 失败 fallback）
+/// 3. d_type 推断（statx 与 fstatat 均失败时，metadata 留空）
+///
+/// - `d_type` 短路判断 FileType（避免 fstatat）
+/// - `read_metadata` / `read_metadata_ext` / `DT_UNKNOWN` 触发 statx 或 fstatat
+/// - stat 字段失败则降级（FileType 用 d_type 推断，metadata 留空），与原 read_dir_unix 一致
+#[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
+fn make_dir_entry_linux<C: ClientState>(
+    mut info: crate::core::unix_dir_enum::LinuxDirEntryOwned,
+    depth: usize,
+    parent_path: Arc<Path>,
+    read_metadata: bool,
+    read_metadata_ext: bool,
+    dirfd: std::os::unix::io::RawFd,
+    follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
+) -> Result<DirEntry<C>> {
+    use crate::core::unix_dir_enum::{fstatat_metadata, file_type_from_dtype, file_type_from_mode};
+    use std::os::unix::fs::PermissionsExt;
+
+    let need_stat = read_metadata || read_metadata_ext || info.d_type == libc::DT_UNKNOWN;
+
+    // d_type → FileType（DT_UNKNOWN 则降级为 S_IFREG，下面 statx/fstatat 成功后覆盖）
+    let mut file_type = file_type_from_dtype(info.d_type)
+        .unwrap_or_else(|| file_type_from_mode(libc::S_IFREG));
+
+    let mut entry_metadata = None;
+    let mut entry_metadata_ext = None;
+
+    // 优先使用 io_uring 批量预取的 statx（NetworkAsync 路径），避免 per-entry fstatat。
+    // statx 路径仅 gnu 可用：libc crate 不为 musl 导出 statx/statx_timestamp/STATX_*，
+    // musl 上 try_fill_from_statx 为 stub（返回 false），自动降级到下方 fstatat。
+    let statx_filled = try_fill_from_statx(
+        &mut info,
+        read_metadata,
+        read_metadata_ext,
+        &mut file_type,
+        &mut entry_metadata,
+        &mut entry_metadata_ext,
+    );
+    if !statx_filled && need_stat {
+        // gnu target: 优先同步 statx（能拿 birth time，io_uring.rs mask 已含 STATX_BTIME）
+        // musl target: libc 不导出 statx，直接走 fstatat（无 btime）
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        let statx_sync_ok: bool = match crate::core::unix_dir_enum::statx_metadata(dirfd, &info.name) {
+            Ok(statx) => {
+                let mode = statx.stx_mode as libc::mode_t;
+                if info.d_type == libc::DT_UNKNOWN {
+                    file_type = file_type_from_mode(mode);
+                }
+                if read_metadata {
+                    entry_metadata = Some(MetaData {
+                        is_dir: (mode & libc::S_IFMT) == libc::S_IFDIR,
+                        is_file: (mode & libc::S_IFMT) == libc::S_IFREG,
+                        is_symlink: (mode & libc::S_IFMT) == libc::S_IFLNK,
+                        size: statx.stx_size,
+                        created: if statx.stx_mask & libc::STATX_BTIME != 0 {
+                            statx_time_to_systemtime(statx.stx_btime)
+                        } else {
+                            None
+                        },
+                        changed: statx_time_to_systemtime(statx.stx_ctime),
+                        modified: statx_time_to_systemtime(statx.stx_mtime),
+                        accessed: statx_time_to_systemtime(statx.stx_atime),
+                        permissions: Some(std::fs::Permissions::from_mode(mode)),
+                    });
+                }
+                if read_metadata_ext {
+                    entry_metadata_ext = Some(MetaDataExt {
+                        st_mode: mode as u32,
+                        st_ino: statx.stx_ino,
+                        st_dev: linux_makedev(statx.stx_dev_major, statx.stx_dev_minor),
+                        st_nlink: statx.stx_nlink as u64,
+                        st_blksize: statx.stx_blksize as u64,
+                        st_blocks: statx.stx_blocks,
+                        st_uid: statx.stx_uid,
+                        st_gid: statx.stx_gid,
+                        st_rdev: linux_makedev(statx.stx_rdev_major, statx.stx_rdev_minor),
+                    });
+                }
+                true
+            }
+            Err(_) => false,
+        };
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        let statx_sync_ok: bool = false;
+
+        if !statx_sync_ok {
+            // fstatat fallback（musl target 或 statx 调用失败）
+            match fstatat_metadata(dirfd, &info.name) {
+                Ok(stat) => {
+                    if info.d_type == libc::DT_UNKNOWN {
+                        file_type = file_type_from_mode(stat.st_mode);
+                    }
+                    if read_metadata {
+                        let mode = stat.st_mode;
+                        entry_metadata = Some(MetaData {
+                            is_dir: (mode & libc::S_IFMT) == libc::S_IFDIR,
+                            is_file: (mode & libc::S_IFMT) == libc::S_IFREG,
+                            is_symlink: (mode & libc::S_IFMT) == libc::S_IFLNK,
+                            size: stat.st_size as u64,
+                            // POSIX stat lacks birth time (stx_btime needs statx(2)).
+                            created: None,
+                            // POSIX change time always present in stat (same source as st_mtime).
+                            changed: time_to_systemtime(stat.st_ctime, stat.st_ctime_nsec as i64),
+                            modified: time_to_systemtime(stat.st_mtime, stat.st_mtime_nsec as i64),
+                            accessed: time_to_systemtime(stat.st_atime, stat.st_atime_nsec as i64),
+                            permissions: Some(std::fs::Permissions::from_mode(mode)),
+                        });
+                    }
+                    if read_metadata_ext {
+                        entry_metadata_ext = Some(MetaDataExt {
+                            st_mode: stat.st_mode,
+                            st_ino: stat.st_ino as u64,
+                            st_dev: stat.st_dev,
+                            st_nlink: stat.st_nlink as u64,
+                            st_blksize: stat.st_blksize as u64,
+                            st_blocks: stat.st_blocks as u64,
+                            st_uid: stat.st_uid,
+                            st_gid: stat.st_gid,
+                            st_rdev: stat.st_rdev,
+                        });
+                    }
+                }
+                Err(_) => {
+                    // fstatat 失败：file_type 用 d_type 推断（已在上方构造），metadata 留空。
+                }
+            }
+        }
+    }
+    DirEntry::from_raw(
+        depth,
+        parent_path,
+        entry_metadata,
+        entry_metadata_ext,
+        info.name,
+        file_type,
+        follow_link_ancestors,
+    )
+}
+
+/// 尝试用 io_uring 批量预取的 statx 填充 file_type / metadata / metadata_ext。
+///
+/// 仅 gnu 路径：`libc` crate 不为 musl target 导出 `statx`/`statx_timestamp`/
+/// `STATX_BASIC_STATS`，musl 上引用 `libc::statx` 会 E0425。返回 true 表示 statx 命中
+/// 并填充了字段（调用方跳过 fstatat）。
+#[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "legacy-read-dir")))]
+fn try_fill_from_statx(
+    info: &mut crate::core::unix_dir_enum::LinuxDirEntryOwned,
+    read_metadata: bool,
+    read_metadata_ext: bool,
+    file_type: &mut std::fs::FileType,
+    entry_metadata: &mut Option<MetaData>,
+    entry_metadata_ext: &mut Option<MetaDataExt>,
+) -> bool {
+    use crate::core::unix_dir_enum::file_type_from_mode;
+    use std::os::unix::fs::PermissionsExt;
+    let Some(statx_box) = info.statx.take() else {
+        return false;
+    };
+    let statx = *statx_box;
+    let mode = statx.stx_mode as libc::mode_t;
+    if info.d_type == libc::DT_UNKNOWN {
+        *file_type = file_type_from_mode(mode);
+    }
+    if read_metadata {
+        *entry_metadata = Some(MetaData {
+            is_dir: (mode & libc::S_IFMT) == libc::S_IFDIR,
+            is_file: (mode & libc::S_IFMT) == libc::S_IFREG,
+            is_symlink: (mode & libc::S_IFMT) == libc::S_IFLNK,
+            size: statx.stx_size,
+            // Birth time: kernel only fills stx_btime when caller's STATX_BTIME mask bit is set.
+            // io_uring.rs requests STATX_BASIC_STATS|STATX_BTIME; CIFS nounix SMB2/3 + kernel>=4.13
+            // + gnu target returns real btime (Steve French commit 6e70e26dc52b). Mask check
+            // guards against filesystems/kernels that ignore STATX_BTIME (ext3, FAT, kernel<4.11).
+            created: if statx.stx_mask & libc::STATX_BTIME != 0 {
+                statx_time_to_systemtime(statx.stx_btime)
+            } else {
+                None
+            },
+            // stx_ctime is POSIX change time; STATX_BASIC_STATS includes STATX_CTIME so always filled.
+            changed: statx_time_to_systemtime(statx.stx_ctime),
+            modified: statx_time_to_systemtime(statx.stx_mtime),
+            accessed: statx_time_to_systemtime(statx.stx_atime),
+            permissions: Some(std::fs::Permissions::from_mode(mode)),
+        });
+    }
+    if read_metadata_ext {
+        *entry_metadata_ext = Some(MetaDataExt {
+            st_mode: mode as u32,
+            st_ino: statx.stx_ino,
+            st_dev: linux_makedev(statx.stx_dev_major, statx.stx_dev_minor),
+            st_nlink: statx.stx_nlink as u64,
+            st_blksize: statx.stx_blksize as u64,
+            st_blocks: statx.stx_blocks,
+            st_uid: statx.stx_uid,
+            st_gid: statx.stx_gid,
+            st_rdev: linux_makedev(statx.stx_rdev_major, statx.stx_rdev_minor),
+        });
+    }
+    true
+}
+
+/// musl / 非 gnu stub：`libc::statx` 在 musl 不导出，直接返回 false 走 fstatat。
+#[cfg(all(target_os = "linux", not(target_env = "gnu"), not(feature = "legacy-read-dir")))]
+fn try_fill_from_statx(
+    _info: &mut crate::core::unix_dir_enum::LinuxDirEntryOwned,
+    _read_metadata: bool,
+    _read_metadata_ext: bool,
+    _file_type: &mut std::fs::FileType,
+    _entry_metadata: &mut Option<MetaData>,
+    _entry_metadata_ext: &mut Option<MetaDataExt>,
+) -> bool {
+    false
+}
+
+/// 将 (秒, 纳秒) 转换为 SystemTime；负秒（epoch 前）返回 None。
+/// Linux glibc 的 stat 字段是 split sec/nsec 形式，不是 timespec。
+#[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
+fn time_to_systemtime(sec: libc::time_t, nsec: i64) -> Option<std::time::SystemTime> {
+    use std::time::{Duration, UNIX_EPOCH};
+    if sec < 0 {
+        return None;
+    }
+    UNIX_EPOCH.checked_add(Duration::new(sec as u64, nsec as u32))
+}
+
+/// 将 libc::statx_timestamp 转换为 SystemTime；负秒（epoch 前）返回 None。
+///
+/// statx 用独立的 `statx_timestamp` 结构体（tv_sec: i64 + tv_nsec: u32 + __reserved: i32），
+/// 与 stat 的 split sec/nsec 不同。stx_btime 是创建时间（stat 没有对应字段）。
+#[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "legacy-read-dir")))]
+fn statx_time_to_systemtime(ts: libc::statx_timestamp) -> Option<std::time::SystemTime> {
+    use std::time::{Duration, UNIX_EPOCH};
+    if ts.tv_sec < 0 {
+        return None;
+    }
+    UNIX_EPOCH.checked_add(Duration::new(ts.tv_sec as u64, ts.tv_nsec))
+}
+
+/// Linux dev_t 编码（与 glibc `makedev` 宏等价）。
+///
+/// statx 拆分为 stx_dev_major / stx_dev_minor（u32）；stat.st_dev 是编码后的 u64。
+/// 此函数将 statx 的拆分字段重新编码为 dev_t，使 MetaDataExt.st_dev 跨 statx/stat 一致。
+///
+/// 编码公式（linux/bits/sysmacros.h MKDEV）：
+/// ```text
+/// bits  0-7:   minor 低 8 位
+/// bits  8-19:  major 低 12 位
+/// bits 20-31:  minor 高 12 位
+/// bits 32-63:  major 高 20 位
+/// ```
+#[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))
+]
+fn linux_makedev(major: u32, minor: u32) -> u64 {
+    let major = major as u64;
+    let minor = minor as u64;
+    ((major & 0xfff) << 8)
+        | ((major & 0xfffff000) << 32)
+        | (minor & 0xff)
+        | ((minor & 0xffffff00) << 12)
+}
+
+// per-worker IoStrategy 缓存：rayon 线程池每个 worker 独立持有，避免锁竞争。
+// 同一 st_dev 只 statfs 一次（参考 beads: ntfs-mft-lock-kills-local-io-uring）。
+#[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))
+]
+thread_local! {
+    static IO_STRATEGY_CACHE: std::cell::RefCell<crate::core::fs_detect::IoStrategyCache> =
+        std::cell::RefCell::new(crate::core::fs_detect::IoStrategyCache::new());
 }

@@ -1,6 +1,6 @@
 [package]
 name = "jwalk-meta"
-version = "0.9.4"
+version = "1.1.0"
 authors = ["Jesse Grosjean <jesse@hogbaysoftware.com>", "Sebastian Thiel <byronimo@gmail.com>", "Martin Bammer <mrbm74@gmail.com>"]
 description = "Filesystem walk performed in parallel with streamed and sorted results."
 documentation = "https://docs.rs/jwalk-meta/"
@@ -12,18 +12,43 @@ categories = ["filesystem", "concurrency"]
 license = "MIT"
 edition = "2021"
 
+[features]
+default = []
+# 启用则强制 Unix 走 std::fs::read_dir fallback（benchmark 对比用）
+# 不启用时 Linux 走 getdents64 直调路径
+legacy-read-dir = []
+windows-only = []  # Windows-only examples (class77_poc, test_ft)，需要时 --features windows-only
+
+[[example]]
+name = "class77_poc"
+required-features = ["windows-only"]
+
+[[example]]
+name = "test_ft"
+required-features = ["windows-only"]
+
 [badges]
 travis-ci = { repository = "brmmm3/jwalk-meta" }
 
 [dependencies]
 rayon = "1.10"
 crossbeam = "0.8"
+smallvec = "1"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3.9", features = ["std", "winioctl", "ioapiset", "fileapi"] }
+winapi = { version = "0.3.9", features = ["std", "winioctl", "ioapiset", "fileapi", "minwinbase", "handleapi", "libloaderapi", "winbase"] }
 
 [target.'cfg(unix)'.dependencies]
 libc =  "0.2"
+
+# Linux io_uring 批量 STATX（仅 Linux）。
+# 内核要求：5.6+ (statx opcode), 5.18+ (setup_submit_all)
+# 注意：feature=legacy-read-dir 启用时此依赖仍会拉入但不被使用
+#（Cargo 不支持 target.cfg.dependencies 中的 feature= 判断）。
+# 架构白名单与 io-uring crate 上游一致（src/sys/mod.rs:18-33）：
+# io-uring 0.7.x 预编译 sys.rs 仅支持这 5 个架构，超出范围会触发 compile_error。
+[target.'cfg(all(target_os = "linux", target_env = "gnu", any(target_arch = "x86_64", target_arch = "aarch64", target_arch = "riscv64", target_arch = "loongarch64", target_arch = "powerpc64")))'.dependencies]
+io-uring = "0.7"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }

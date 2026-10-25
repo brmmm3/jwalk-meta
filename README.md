@@ -1,65 +1,112 @@
-jwalk-meta
-==========
+# jwalk-meta
 
-Filesystem walk.
+高性能并行目录遍历库，专为大规模文件系统扫描优化。
 
-- Performed in parallel using rayon
-- Entries streamed in sorted order
-- Custom sort/filter/skip/state
+基于 [jwalk](https://github.com/Byron/jwalk) fork，在保留原有并行遍历能力的基础上，新增 Windows NT Native API 枚举、流式子目录分发和优先淹没调度算法。
 
-This is a fork of [https://github.com/Byron/jwalk](https://github.com/Byron/jwalk). This project adds optional collecting metadata to improve performance if metadata is needed later.
+## 特性
 
-[![Build Status](https://travis-ci.org/brmmm3/jwalk-meta.svg?branch=master)](https://travis-ci.org/brmmm3/jwalk-meta)
-[![Latest version](http://meritbadge.herokuapp.com/jwalk-meta)](https://crates.io/crates/jwalk-meta)
+- **rayon 并行遍历** — 目录级并行，自动利用所有 CPU 核心
+- **NT Native API 枚举** (Windows) — 使用 `NtQueryDirectoryFileEx` + 64KB 批量缓冲区替代 `FindFirstFile/FindNextFile`，单次系统调用获取数百条目，大幅减少用户态-内核态切换
+- **流式子目录分发** — 枚举巨型目录时，每批 NtQuery 发现子目录立即推入调度队列，不等整个目录枚举完成。消除百万级目录的启动延迟
+- **优先淹没算法** — `weight = parent_weight + subdir_count`，子目录越多的分支获得越高调度优先级，自动将更多线程分配给"大水管"子树
+- **有序流式输出** — DFS 前序保证父目录先于子目录产出，OrderedMatcher 跟踪遍历游标
+- **元数据扩展** — 可选收集文件属性、时间戳、大小等元数据，避免二次 `stat` 调用
 
-### Usage
+## 性能
 
-Add this to your `Cargo.toml`:
+实测环境：Windows 11，SMB 网络共享 (`Z:\测试`)
+
+
+| 指标     | 数值            |
+| -------- | --------------- |
+| 总条目数 | 1,981,338       |
+| 目录数   | 412,935         |
+| 文件数   | 1,568,403       |
+| 总耗时   | 377 秒          |
+| 吞吐量   | 5,255 entries/s |
+| 首秒产出 | 15,007 entries  |
+| 错误数   | 0               |
+
+对比优化前：同目录扫描首 265 秒仅有 271 条产出（卡在单个巨型目录的阻塞枚举上）。
+
+## 安装
 
 ```toml
 [dependencies]
-jwalk-meta = "0.9"
+jwalk-meta = "1.0"
 ```
 
-Lean More: [docs.rs/jwalk-meta](https://docs.rs/jwalk-meta)
+需要 Rust nightly 工具链。
 
-### Example
+## 使用
 
-Recursively iterate over the "foo" directory sorting by name:
+### 基本用法
 
 ```rust
-use jwalk_meta::{WalkDir};
+use jwalk_meta::WalkDir;
 
 for entry in WalkDir::new("foo").sort(true) {
-  println!("{}", entry?.path().display());
+    println!("{}", entry?.path().display());
 }
 ```
 
-### Inspiration
+### 带元数据收集
 
-This crate is inspired by both [`walkdir`](https://crates.io/crates/walkdir) and
-[`ignore`](https://crates.io/crates/ignore). It attempts to combine the
-parallelism of `ignore` with `walkdir`'s streaming iterator API. Some code and
-comments are copied directly from `walkdir`.
+```rust
+use jwalk_meta::WalkDir;
 
-### Why use this crate?
+for entry in WalkDir::new("foo")
+    .read_metadata(true)
+{
+    let entry = entry?;
+    if let Some(metadata) = &entry.metadata {
+        println!("{} ({} bytes)", entry.path().display(), metadata.size);
+    }
+}
+```
 
-This crate is particularly good when you want streamed sorted results. In my
-tests it's about 4x `walkdir` speed for sorted results with metadata. Also this
-crate's `process_read_dir` callback allows you to arbitrarily
-sort/filter/skip/state entries before they are yielded.
+## 架构
 
-### Why not use this crate?
+```
+                    ┌─────────────┐
+                    │   Root Dir  │ weight = usize::MAX >> 1
+                    └──────┬──────┘
+                           │
+              ┌────────────┼────────────┐
+              ▼            ▼            ▼
+        ┌──────────┐ ┌──────────┐ ┌──────────┐
+        │ Dir A    │ │ Dir B    │ │ Dir C    │
+        │ children │ │ children │ │ children │
+        │ = 150    │ │ = 2      │ │ = 50     │
+        │ weight   │ │ weight   │ │ weight   │
+        │ = MAX    │ │ = MAX    │ │ = MAX    │
+        │ +150     │ │ +2       │ │ +50      │
+        └──────────┘ └──────────┘ └──────────┘
+              ▲
+              │  优先淹没：子目录越多 → 权重越高 → 越多线程处理
+              │
+         BinaryHeap (max-heap) 调度
+```
 
-Directory traversal is already pretty fast. If you don't need this crate's speed
-then `walkdir` provides a smaller and more tested single threaded
-implementation.
+### 核心组件
 
-This crates parallelism happens at the directory level. It will help when
-walking deep file systems with many directories. It wont help when reading a
-single directory with many files.
 
-### Benchmarks
+| 组件                      | 文件                | 职责                                  |
+| ------------------------- | ------------------- | ------------------------------------- |
+| `Weighted<T>`             | `weighted.rs`       | 带权重的调度单元，BinaryHeap max-heap |
+| `PriorityQueue`           | `priority_queue.rs` | 线程安全的优先级队列 + channel        |
+| `StreamingContext`        | `read_dir_iter.rs`  | 流式分发上下文，携带 parent_weight    |
+| `ReadDirIter`             | `read_dir_iter.rs`  | 并行遍历迭代器，流式/常规双模式       |
+| `enumerate_dir_streaming` | `nt_dir_enum.rs`    | NT Native API 流式枚举（Windows）     |
+| `OrderedQueue`            | `ordered_queue.rs`  | 有序输出队列，Strict/Relaxed 排序     |
 
-[Benchmarks](https://github.com/brmmm3/jwalk-meta/blob/master/benches/benchmarks.md)
-comparing this crate with `walkdir` and `ignore`.
+## 致谢
+
+- [jwalk](https://github.com/Byron/jwalk) — 原始并行遍历框架
+- [walkdir](https://crates.io/crates/walkdir) — 流式迭代器 API 设计
+- [ignore](https://crates.io/crates/ignore) — 并行遍历思路
+
+## 许可证
+
+MIT
