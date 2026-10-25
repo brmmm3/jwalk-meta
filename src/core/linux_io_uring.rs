@@ -25,7 +25,7 @@
 ))]
 // io-uring 0.7.x 预编译 sys.rs 白名单（上游 src/sys/mod.rs:18-33），超出范围触发 compile_error。
 
-use crate::core::unix_dir_enum::LinuxDirEntryOwned;
+use crate::core::unix_dir_enum::{LinuxDirEntryOwned, LinuxStatxResults};
 use io_uring::{opcode, types, IoUring};
 use std::ffi::CString;
 use std::io;
@@ -80,9 +80,9 @@ fn probe_io_uring() -> bool {
 /// 批量 STATX via io_uring。
 ///
 /// 对 `entries` 中每个有合法 name 的条目提交一个 Statx SQE，一次 submit_and_wait
-/// 收割所有 CQE。成功的条目（`cqe.result() == 0`）将 statx 写入 `entry.statx`；
+/// 收割所有 CQE。成功的条目（`cqe.result() == 0`）写入结果向量对应槽位；
 /// 失败的条目（含 NUL byte 跳过、SQE 提交失败、CQE result < 0）保持 `None`，
-/// 调用方降级到 d_type 推断 + per-entry fstatat fallback。
+/// 调用方降级到 d_type 推断 + per-entry statx/fstatat fallback。
 ///
 /// # 算法
 ///
@@ -95,7 +95,7 @@ fn probe_io_uring() -> bool {
 /// # 错误处理
 ///
 /// ring 创建失败 → 返回 `Err`，调用方应 fallback 到 LocalSync（不调用本函数）。
-/// submit_and_wait 失败 → 返回 `Err`，已写入的 statx 保留，未完成的条目保持 None。
+/// submit_and_wait 失败 → 返回 `Err`，已写入的结果保留，未完成的条目保持 None。
 ///
 /// # Safety
 ///
@@ -105,17 +105,20 @@ fn probe_io_uring() -> bool {
 pub fn batch_statx_via_io_uring(
     entries: &mut [LinuxDirEntryOwned],
     dirfd: RawFd,
+    results: &mut LinuxStatxResults,
 ) -> io::Result<()> {
     if entries.is_empty() {
         return Ok(());
     }
+    results.results.clear();
+    results.results.resize_with(entries.len(), || None);
 
     // 分批处理，每批最多 RING_SIZE 个条目
     for chunk_start in (0..entries.len()).step_by(RING_SIZE as usize) {
         let chunk_end = (chunk_start + RING_SIZE as usize).min(entries.len());
         let chunk = &mut entries[chunk_start..chunk_end];
         // 单批失败不影响已完成的批；但 record 错误让调用方知道整体不完整
-        batch_statx_chunk(chunk, dirfd)?;
+        batch_statx_chunk(chunk, chunk_start, dirfd, results)?;
     }
     Ok(())
 }
@@ -123,7 +126,9 @@ pub fn batch_statx_via_io_uring(
 /// 处理一批（≤ RING_SIZE）条目的 STATX。
 fn batch_statx_chunk(
     entries: &mut [LinuxDirEntryOwned],
+    chunk_start: usize,
     dirfd: RawFd,
+    results: &mut LinuxStatxResults,
 ) -> io::Result<()> {
     let n = entries.len();
     debug_assert!(n <= RING_SIZE as usize);
@@ -200,9 +205,9 @@ fn batch_statx_chunk(
             // SAFETY: CQE result==0 → 内核已写入 statx_bufs[local_idx] 完整内容
             let stx = unsafe { statx_bufs[local_idx].assume_init() };
             let entry_idx = local_to_entry[local_idx];
-            entries[entry_idx].statx = Some(Box::new(stx));
+            results.results[chunk_start + entry_idx] = Some(stx);
         }
-        // result < 0 → entry.statx 保持 None（已在 LinuxDirEntryOwned 初始化时设为 None）
+        // result < 0 → result slot 保持 None，调用方走 fstatat fallback。
     }
 
     // drop cstrings + statx_bufs 在函数返回时发生，此时 ring 已收割完毕，可安全释放。
@@ -221,8 +226,6 @@ mod tests {
         LinuxDirEntryOwned {
             d_type,
             name: OsString::from(name),
-            #[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "legacy-read-dir")))]
-            statx: None,
         }
     }
 
@@ -266,7 +269,8 @@ mod tests {
             file_names.iter().map(|n| make_entry(libc::DT_REG, n)).collect();
 
         // 执行批量 statx
-        let result = batch_statx_via_io_uring(&mut entries, fd);
+        let mut statx_results = LinuxStatxResults::default();
+        let result = batch_statx_via_io_uring(&mut entries, fd, &mut statx_results);
         unsafe { libc::close(fd) };
 
         if result.is_err() {
@@ -277,11 +281,8 @@ mod tests {
         assert!(result.is_ok());
 
         // 验证：每个 entry 应有 statx，且 stx_ino 与 fs::stat 一致
-        for (entry, name) in entries.iter().zip(file_names.iter()) {
-            let statx = entry
-                .statx
-                .as_ref()
-                .expect("statx should be filled for existing file");
+        for (name, statx) in file_names.iter().zip(statx_results.results.iter()) {
+            let statx = statx.as_ref().expect("statx should be filled for existing file");
             let path = tmp.join(name);
             let fs_meta = fs::symlink_metadata(&path).unwrap();
             let fs_ino = fs_meta.ino();
@@ -306,7 +307,8 @@ mod tests {
     #[test]
     fn test_batch_statx_empty_noop() {
         let mut entries: Vec<LinuxDirEntryOwned> = Vec::new();
-        let result = batch_statx_via_io_uring(&mut entries, -1);
+        let mut statx_results = LinuxStatxResults::default();
+        let result = batch_statx_via_io_uring(&mut entries, -1, &mut statx_results);
         assert!(result.is_ok());
     }
 
@@ -343,7 +345,8 @@ mod tests {
             make_entry(libc::DT_REG, "bad\u{0}name"),
         ];
 
-        let result = batch_statx_via_io_uring(&mut entries, fd);
+        let mut statx_results = LinuxStatxResults::default();
+        let result = batch_statx_via_io_uring(&mut entries, fd, &mut statx_results);
         unsafe { libc::close(fd) };
 
         if result.is_err() {
@@ -352,14 +355,14 @@ mod tests {
         }
 
         // 第一个应填充，第二个应保持 None（CString::new 失败）
-        assert!(entries[0].statx.is_some(), "valid entry should be filled");
+        assert!(statx_results.results[0].is_some(), "valid entry should be filled");
         assert!(
-            entries[1].statx.is_none(),
+            statx_results.results[1].is_none(),
             "NUL-byte entry should remain None"
         );
     }
 
-    /// 不存在的目录 fd → 批量仍执行，CQE result < 0，所有 entry.statx 保持 None。
+    /// 非目录 fd → CQE error，结果槽位保持 None。
     #[test]
     fn test_batch_statx_nonexistent_files_yields_none_statx() {
         if !io_uring_enabled() {
@@ -385,13 +388,14 @@ mod tests {
             make_entry(libc::DT_REG, "ghost2.txt"),
         ];
 
-        let _result = batch_statx_via_io_uring(&mut entries, fd);
+        let mut statx_results = LinuxStatxResults::default();
+        let _result = batch_statx_via_io_uring(&mut entries, fd, &mut statx_results);
         unsafe { libc::close(fd) };
 
         // statx 应全部为 None（CQE 错误）
-        for (i, e) in entries.iter().enumerate() {
+        for i in 0..entries.len() {
             assert!(
-                e.statx.is_none(),
+                statx_results.results[i].is_none(),
                 "entry {} should have None statx (expected CQE error)",
                 i
             );

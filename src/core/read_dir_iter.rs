@@ -189,9 +189,10 @@ fn multi_threaded_walk_dir<C: ClientState>(
 
     let read_dir_result = (run_context.core_read_dir_callback)(read_dir_spec, Some(streaming_ctx));
 
-    let schedule_regular = read_dir_result.as_ref().is_ok_and(|read_dir| {
-        read_dir.streamed_child_count == 0
-    });
+    // Streaming callbacks may discover only a subset of traversable children (for example,
+    // followed directory symlinks). Always schedule the remaining specs; ReadDir skips the
+    // first `streamed_child_count` children which were already enqueued.
+    let schedule_regular = read_dir_result.is_ok();
 
     let weighted_children_specs = if schedule_regular {
         read_dir_result

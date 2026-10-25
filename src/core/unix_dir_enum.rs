@@ -70,15 +70,45 @@ impl Drop for DirFdGuard {
     }
 }
 
+/// Batched statx results returned by the Linux io_uring path.
+///
+/// Keeping the results in one contiguous allocation avoids a separate heap allocation for
+/// every directory entry. The empty non-GNU variant keeps the directory conversion API
+/// available on Linux targets where libc does not expose `statx`.
+#[cfg(all(target_env = "gnu", not(feature = "legacy-read-dir")))]
+#[derive(Default)]
+pub struct LinuxStatxResults {
+    pub(crate) results: Vec<Option<libc::statx>>,
+}
+
+#[cfg(not(all(target_env = "gnu", not(feature = "legacy-read-dir"))))]
+#[derive(Default)]
+pub struct LinuxStatxResults;
+
+#[cfg(all(target_env = "gnu", not(feature = "legacy-read-dir")))]
+pub struct LinuxStatxResult(pub(crate) Option<libc::statx>);
+
+#[cfg(not(all(target_env = "gnu", not(feature = "legacy-read-dir"))))]
+pub struct LinuxStatxResult;
+
+#[cfg(all(target_env = "gnu", not(feature = "legacy-read-dir")))]
+impl LinuxStatxResults {
+    pub(crate) fn take(&mut self, index: usize) -> LinuxStatxResult {
+        LinuxStatxResult(self.results.get_mut(index).and_then(Option::take))
+    }
+}
+
+#[cfg(not(all(target_env = "gnu", not(feature = "legacy-read-dir"))))]
+impl LinuxStatxResults {
+    pub(crate) fn take(&mut self, _index: usize) -> LinuxStatxResult {
+        LinuxStatxResult
+    }
+}
+
 /// 已收集的目录条目（拥有化，可越过 buffer 复用）。
 pub struct LinuxDirEntryOwned {
     pub d_type: u8,
     pub name: OsString,
-    /// io_uring 批量 STATX 预取结果（NetworkAsync 路径填充）。
-    /// LocalSync / 批量失败 / CQE 错误时为 None，调用方走 fstatat fallback。
-    #[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "legacy-read-dir")))
-    ]
-    pub statx: Option<Box<libc::statx>>,
 }
 
 /// 打开目录获取 fd（O_RDONLY | O_DIRECTORY | O_CLOEXEC）。
@@ -170,9 +200,6 @@ pub fn enumerate_dir_unix(
                 entries.push(LinuxDirEntryOwned {
                     d_type,
                     name: OsString::from(name),
-                    #[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "legacy-read-dir")))
-                    ]
-                    statx: None,
                 });
             });
         }
@@ -210,11 +237,12 @@ pub fn enumerate_dir_unix_streaming(
                 let owned = LinuxDirEntryOwned {
                     d_type,
                     name: OsString::from(name),
-                    #[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "legacy-read-dir")))
-                    ]
-                    statx: None,
                 };
-                if d_type == libc::DT_DIR {
+
+                // DT_UNKNOWN is common on some network and synthetic filesystems. Resolve it
+                // here so streamed scheduling counts every real directory in the same order
+                // that ReadDir will later expose its child specs.
+                if entry_is_directory(fd, d_type, &owned.name) {
                     on_subdir(&owned);
                 }
                 entries.push(owned);
@@ -246,6 +274,16 @@ pub fn fstatat_metadata(dirfd: RawFd, name: &OsStr) -> io::Result<libc::stat> {
     } else {
         Ok(stat)
     }
+}
+
+/// Determine whether a getdents entry is a directory, resolving `DT_UNKNOWN` when necessary.
+fn entry_is_directory(dirfd: RawFd, d_type: u8, name: &OsStr) -> bool {
+    if d_type == libc::DT_DIR {
+        return true;
+    }
+    d_type == libc::DT_UNKNOWN
+        && fstatat_metadata(dirfd, name)
+            .is_ok_and(|stat| (stat.st_mode & libc::S_IFMT) == libc::S_IFDIR)
 }
 
 /// 通过 `statx(dirfd, name, AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS|STATX_BTIME)` 同步获取 statx。
@@ -472,9 +510,6 @@ mod tests {
                 let owned = LinuxDirEntryOwned {
                     d_type,
                     name: OsString::from(name),
-                    #[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "legacy-read-dir")))
-                    ]
-                    statx: None,
                 };
                 if d_type == libc::DT_DIR {
                     subdir_names.push(owned.name.clone());
@@ -518,6 +553,31 @@ mod tests {
         for e in &entries {
             assert!(!e.name.is_empty());
         }
+    }
+
+    #[test]
+    fn test_unknown_dtype_directory_is_streamable() {
+        let tmp = std::env::temp_dir().join(format!(
+            "jwalk_meta_unknown_dtype_test_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(tmp.join("subdir")).unwrap();
+        std::fs::write(tmp.join("file"), b"x").unwrap();
+        let _guard = scopeguard::guard(tmp.clone(), |path| {
+            let _ = std::fs::remove_dir_all(path);
+        });
+
+        let cstr = std::ffi::CString::new(tmp.as_os_str().as_bytes()).unwrap();
+        let fd = unsafe {
+            libc::open(
+                cstr.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            )
+        };
+        assert!(fd >= 0);
+        assert!(entry_is_directory(fd, libc::DT_UNKNOWN, OsStr::new("subdir")));
+        assert!(!entry_is_directory(fd, libc::DT_UNKNOWN, OsStr::new("file")));
+        unsafe { libc::close(fd) };
     }
 }
 

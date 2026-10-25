@@ -1344,7 +1344,13 @@ fn read_dir_linux_via_getdents<C: ClientState>(
     use crate::core::unix_dir_enum::{self, DirFdGuard, LinuxDirEntryOwned};
     use std::cell::Cell;
 
-    let use_streaming = streaming_ctx.is_some() && !sort && process_read_dir.is_none();
+    // Following links can turn a symlink into a traversable directory only after entry
+    // conversion. Keep that case on the regular scheduling path so it is not omitted from
+    // streaming's child count / ordered traversal accounting.
+    let use_streaming = streaming_ctx.is_some()
+        && !sort
+        && process_read_dir.is_none()
+        && !follow_links;
     let streamed_count = Cell::new(0usize);
 
     let entries_result: std::io::Result<(DirFdGuard, Vec<LinuxDirEntryOwned>)> = if use_streaming {
@@ -1361,10 +1367,8 @@ fn read_dir_linux_via_getdents<C: ClientState>(
             if ctx.is_stopped() {
                 return;
             }
-            // 只调度子目录（与 Windows 端 FILE_ATTRIBUTE_DIRECTORY 过滤对齐）
-            if info.d_type != libc::DT_DIR {
-                return;
-            }
+            // enumerate_dir_unix_streaming invokes this only for entries known to be
+            // directories, including DT_UNKNOWN entries verified with fstatat.
             if skip_hidden && is_hidden(&info.name) {
                 return;
             }
@@ -1419,6 +1423,7 @@ fn read_dir_linux_via_getdents<C: ClientState>(
     // 仅对网络挂载（SMB/NFS/CIFS）启用：单次 submit_and_wait 批量获取 statx，
     // 替代 N 次 per-entry fstatat。本地路径（LocalSync）走下方 fstatat 路径不变。
     // 历史教训：NTFS MFT 卷级锁让多线程变慢（5367f20 回档），本地 FS 不启用 io_uring。
+    let mut statx_results = crate::core::unix_dir_enum::LinuxStatxResults::default();
     #[cfg(all(
         target_os = "linux",
         target_env = "gnu",
@@ -1434,25 +1439,32 @@ fn read_dir_linux_via_getdents<C: ClientState>(
     // 不引用 linux_io_uring 模块任何符号（unresolved module 会编译失败）。
     {
         use crate::core::fs_detect::IoStrategy;
-        let strategy = IO_STRATEGY_CACHE.with(|c| c.borrow_mut().detect(path.as_ref()));
         let need_meta_or_type = read_metadata
             || read_metadata_ext
             || entries.iter().any(|e| e.d_type == libc::DT_UNKNOWN);
-        if strategy == IoStrategy::NetworkAsync
-            && crate::core::linux_io_uring::io_uring_enabled()
-            && need_meta_or_type
-            && entries.len() >= crate::core::linux_io_uring::MIN_BATCH_FOR_IO_URING
-        {
-            // 静默 fallback：ring 不可用或 CQE 失败 → entries[i].statx 保持 None，
-            // 静默 fallback：ring 不可用或 CQE 失败 → entries[i].statx 保持 None，
-            // make_dir_entry_linux 自动降级到 per-entry fstatat（行为与 LocalSync 一致）。
-            let _ = crate::core::linux_io_uring::batch_statx_via_io_uring(&mut entries, dirfd);
+        if need_meta_or_type && entries.len() >= crate::core::linux_io_uring::MIN_BATCH_FOR_IO_URING {
+            // fstat the already-open directory descriptor to obtain st_dev for the per-worker
+            // cache. This avoids resolving the directory path again on every cache hit.
+            let strategy = IO_STRATEGY_CACHE
+                .with(|c| c.borrow_mut().detect_for_fd(path.as_ref(), dirfd));
+            if strategy == IoStrategy::NetworkAsync
+                && crate::core::linux_io_uring::io_uring_enabled()
+            {
+                // Missing results / CQE errors remain None and fall back to per-entry statx.
+                let _ = crate::core::linux_io_uring::batch_statx_via_io_uring(
+                    &mut entries,
+                    dirfd,
+                    &mut statx_results,
+                );
+            }
         }
     }
 
     let mut dir_entry_results: Vec<_> = entries
         .into_iter()
+        .enumerate()
         .filter_map(|info| {
+            let (entry_index, info) = info;
             if skip_hidden && is_hidden(&info.name) {
                 return None;
             }
@@ -1464,6 +1476,7 @@ fn read_dir_linux_via_getdents<C: ClientState>(
                 read_metadata,
                 read_metadata_ext,
                 dirfd,
+                statx_results.take(entry_index),
                 follow_link_ancestors.clone(),
             ) {
                 Ok(e) => e,
@@ -1497,7 +1510,7 @@ fn read_dir_linux_via_getdents<C: ClientState>(
 /// 从 LinuxDirEntryOwned 构造 DirEntry（Linux getdents64 路径专用）。
 ///
 /// 元数据获取优先级：
-/// 1. `info.statx`（io_uring 批量 STATX 预取，NetworkAsync 路径）
+/// 1. io_uring 批量 STATX 预取（NetworkAsync 路径）
 /// 2. `fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)`（LocalSync / io_uring 失败 fallback）
 /// 3. d_type 推断（statx 与 fstatat 均失败时，metadata 留空）
 ///
@@ -1506,12 +1519,13 @@ fn read_dir_linux_via_getdents<C: ClientState>(
 /// - stat 字段失败则降级（FileType 用 d_type 推断，metadata 留空），与原 read_dir_unix 一致
 #[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
 fn make_dir_entry_linux<C: ClientState>(
-    mut info: crate::core::unix_dir_enum::LinuxDirEntryOwned,
+    info: crate::core::unix_dir_enum::LinuxDirEntryOwned,
     depth: usize,
     parent_path: Arc<Path>,
     read_metadata: bool,
     read_metadata_ext: bool,
     dirfd: std::os::unix::io::RawFd,
+    statx: crate::core::unix_dir_enum::LinuxStatxResult,
     follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
 ) -> Result<DirEntry<C>> {
     use crate::core::unix_dir_enum::{fstatat_metadata, file_type_from_dtype, file_type_from_mode};
@@ -1530,7 +1544,8 @@ fn make_dir_entry_linux<C: ClientState>(
     // statx 路径仅 gnu 可用：libc crate 不为 musl 导出 statx/statx_timestamp/STATX_*，
     // musl 上 try_fill_from_statx 为 stub（返回 false），自动降级到下方 fstatat。
     let statx_filled = try_fill_from_statx(
-        &mut info,
+        statx,
+        info.d_type,
         read_metadata,
         read_metadata_ext,
         &mut file_type,
@@ -1645,7 +1660,8 @@ fn make_dir_entry_linux<C: ClientState>(
 /// 并填充了字段（调用方跳过 fstatat）。
 #[cfg(all(target_os = "linux", target_env = "gnu", not(feature = "legacy-read-dir")))]
 fn try_fill_from_statx(
-    info: &mut crate::core::unix_dir_enum::LinuxDirEntryOwned,
+    statx_result: crate::core::unix_dir_enum::LinuxStatxResult,
+    d_type: u8,
     read_metadata: bool,
     read_metadata_ext: bool,
     file_type: &mut std::fs::FileType,
@@ -1654,12 +1670,11 @@ fn try_fill_from_statx(
 ) -> bool {
     use crate::core::unix_dir_enum::file_type_from_mode;
     use std::os::unix::fs::PermissionsExt;
-    let Some(statx_box) = info.statx.take() else {
+    let Some(statx) = statx_result.0 else {
         return false;
     };
-    let statx = *statx_box;
     let mode = statx.stx_mode as libc::mode_t;
-    if info.d_type == libc::DT_UNKNOWN {
+    if d_type == libc::DT_UNKNOWN {
         *file_type = file_type_from_mode(mode);
     }
     if read_metadata {
@@ -1703,7 +1718,8 @@ fn try_fill_from_statx(
 /// musl / 非 gnu stub：`libc::statx` 在 musl 不导出，直接返回 false 走 fstatat。
 #[cfg(all(target_os = "linux", not(target_env = "gnu"), not(feature = "legacy-read-dir")))]
 fn try_fill_from_statx(
-    _info: &mut crate::core::unix_dir_enum::LinuxDirEntryOwned,
+    _statx_result: crate::core::unix_dir_enum::LinuxStatxResult,
+    _d_type: u8,
     _read_metadata: bool,
     _read_metadata_ext: bool,
     _file_type: &mut std::fs::FileType,

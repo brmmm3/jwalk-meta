@@ -10,8 +10,10 @@
 #![cfg(target_os = "linux")]
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::io;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::io::RawFd;
 use std::path::Path;
 
 // ── f_type 常量（来自 linux/magic.h，避免依赖 libc 是否导出这些常量）──────────
@@ -78,12 +80,8 @@ impl IoStrategyCache {
         self.map.insert(dev, strategy);
     }
 
-    /// 检测路径所在文件系统的 I/O 策略。结果按 `st_dev` 缓存。
-    ///
-    /// 流程：`stat(path)` → `st_dev` → cache lookup → 命中返回；
-    /// 未命中则 `statfs(path)` → `f_type` → 策略 → 写缓存。
-    ///
-    /// 任何 syscall 失败（路径不存在 / 权限不足）保守返回 `LocalSync`。
+    /// Test helper retaining the path-based strategy lookup.
+    #[cfg(test)]
     pub fn detect(&mut self, path: &Path) -> IoStrategy {
         match stat_dev(path) {
             Ok(dev) => {
@@ -97,9 +95,30 @@ impl IoStrategyCache {
             Err(_) => IoStrategy::LocalSync,
         }
     }
+
+    /// Detect the strategy using an already-open directory descriptor.
+    ///
+    /// `fstat` avoids resolving the directory path again, and the caller only needs to
+    /// invoke this for directories large enough to qualify for batched metadata I/O.
+    pub fn detect_for_fd(&mut self, path: &Path, fd: RawFd) -> IoStrategy {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: fd is the open directory descriptor used by the caller; st is zeroed.
+        if unsafe { libc::fstat(fd, &mut st) } < 0 {
+            return IoStrategy::LocalSync;
+        }
+        let dev = st.st_dev;
+        if let Some(strategy) = self.map.get(&dev).copied() {
+            return strategy;
+        }
+
+        let strategy = statfs_strategy(path).unwrap_or(IoStrategy::LocalSync);
+        self.map.insert(dev, strategy);
+        strategy
+    }
 }
 
 /// 用 `stat(2)` 取 `st_dev`。
+#[cfg(test)]
 fn stat_dev(path: &Path) -> io::Result<u64> {
     let cstr = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL byte"))?;
@@ -263,6 +282,22 @@ mod tests {
         assert_eq!(cache.get(dev), Some(s1));
         let s2 = cache.detect(&tmp);
         assert_eq!(s1, s2);
+    }
+
+    #[test]
+    fn test_detect_for_fd_uses_cached_device_strategy() {
+        let tmp = std::env::temp_dir();
+        let fd = std::fs::File::open(&tmp).unwrap();
+        let dev = stat_dev(&tmp).unwrap();
+        let mut cache = IoStrategyCache::new();
+        cache.insert(dev, IoStrategy::SkipNlinks);
+        assert_eq!(
+            cache.detect_for_fd(
+                Path::new("/path/that/does/not/exist"),
+                std::os::unix::io::AsRawFd::as_raw_fd(&fd)
+            ),
+            IoStrategy::SkipNlinks
+        );
     }
 
     /// 不存在路径 → 保守 LocalSync（不 panic）。

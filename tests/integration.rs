@@ -1608,6 +1608,28 @@ fn symlink_follow_cross_platform() {
     );
 }
 
+#[cfg(target_os = "linux")]
+#[test]
+fn parallel_follow_directory_symlink_with_streamable_sibling() {
+    let dir = Dir::tmp();
+    dir.mkdirp("ordinary");
+    dir.mkdirp("target");
+    dir.touch("ordinary/ordinary.txt");
+    dir.touch("target/through-link.txt");
+    dir.symlink_dir("target", "linkdir");
+
+    let results = dir.run_recursive(
+        WalkDir::new(dir.path())
+            .parallelism(Parallelism::RayonNewPool(2))
+            .follow_links(true),
+    );
+    results.assert_no_errors();
+    assert!(
+        results.paths().contains(&dir.join("linkdir/through-link.txt")),
+        "the target file must be visited through the directory symlink"
+    );
+}
+
 #[test]
 fn permission_denied_graceful() {
     let dir = Dir::tmp();

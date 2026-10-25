@@ -16,11 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Reduce redundant system calls and improve performance when collecting extended metadata, including hard-link and volume information.
 - Detect filesystem types and select an appropriate synchronous or asynchronous Linux I/O strategy, falling back safely when needed.
+- Avoid repeated path resolution for cached Linux filesystem-strategy lookups and store batched `statx` results contiguously to reduce per-entry allocations.
 
 ### Fixed
 
 - Restrict Linux `statx` and `io_uring` support to compatible GNU targets and supported architectures, including fixes for musl and 32-bit libc builds.
 - Fix Linux build issues and filesystem-specific metadata handling.
+- Fix parallel Linux traversal with `follow_links(true)` so directory symlinks are scheduled, and recognize `DT_UNKNOWN` directories in streaming enumeration.
 
 ## [1.0.8] - 2026-06-24
 
