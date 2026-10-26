@@ -552,7 +552,10 @@ fn main() {
         );
     }
     if class37_entries.len() < 3 {
-        eprintln!("Warning: too few entries in the test directory ({}); rerun in a directory containing at least 5 files", class37_entries.len());
+        eprintln!(
+            "Warning: too few entries in the test directory ({}); rerun in a directory containing at least 5 files",
+            class37_entries.len()
+        );
     }
 
     // Dump the first 1024 bytes of class 37.
@@ -674,12 +677,20 @@ fn main() {
         None => {
             println!("\n=== All class 77 directory-enumeration attempts failed ===");
             if single_file_class77_ok.is_some() {
-                println!("The single-file query succeeded, so the system recognizes class 77, but NtQueryDirectoryFileEx rejects it for directory enumeration.");
-                println!("Conclusion: class 77 cannot be used for directory enumeration; abandon this optimization.");
+                println!(
+                    "The single-file query succeeded, so the system recognizes class 77, but NtQueryDirectoryFileEx rejects it for directory enumeration."
+                );
+                println!(
+                    "Conclusion: class 77 cannot be used for directory enumeration; abandon this optimization."
+                );
             } else {
-                println!("The single-file query also failed — the system may not recognize class 77, possibly because Windows is too old.");
+                println!(
+                    "The single-file query also failed — the system may not recognize class 77, possibly because Windows is too old."
+                );
             }
-            println!("Tip: see the PoC startup information for the Windows build number (PowerShell: `[Environment]::OSVersion.Version.Build`)");
+            println!(
+                "Tip: see the PoC startup information for the Windows build number (PowerShell: `[Environment]::OSVersion.Version.Build`)"
+            );
             return;
         }
     };
@@ -802,7 +813,9 @@ fn main() {
                     unsafe { std::ptr::read_unaligned(c37_ptr as *const FILE_ID_BOTH_DIR_INFO) };
                 println!(
                     "  Baseline reference \"{}\": LastWriteTime={:#x}, EndOfFile={:#x}, FileAttributes={:#x}",
-                    baseline_name, c37_entry.LastWriteTime as u64, c37_entry.EndOfFile as u64,
+                    baseline_name,
+                    c37_entry.LastWriteTime as u64,
+                    c37_entry.EndOfFile as u64,
                     c37_entry.FileAttributes
                 );
                 println!(

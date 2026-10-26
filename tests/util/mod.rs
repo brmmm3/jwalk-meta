@@ -218,7 +218,7 @@ impl TempDir {
     /// temporary directory.
     pub fn new() -> Result<TempDir> {
         #[allow(deprecated)]
-        use std::sync::atomic::{AtomicUsize, Ordering, ATOMIC_USIZE_INIT};
+        use std::sync::atomic::{ATOMIC_USIZE_INIT, AtomicUsize, Ordering};
 
         static TRIES: usize = 100;
         #[allow(deprecated)]

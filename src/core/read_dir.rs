@@ -23,11 +23,9 @@ impl<C: ClientState> ReadDir<C> {
     }
 
     pub fn read_children_specs(&self) -> impl Iterator<Item = ReadDirSpec<C>> + '_ {
-        self.results_list.iter().filter_map(move |each| {
-            each.as_ref()
-                .ok()?
-                .read_children_spec(&self.read_dir_state)
-        })
+        self.results_list
+            .iter()
+            .filter_map(move |each| each.as_ref().ok()?.read_children_spec(&self.read_dir_state))
     }
 
     /// Single-pass traversal: generate Weighted<ReadDirSpec> directly, skipping subdirectories already scheduled during streaming.

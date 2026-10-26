@@ -120,10 +120,10 @@ impl<C: ClientState> ReadDirIter<C> {
                 })
                 .unwrap_or((None, None));
             parallelism.spawn(move || {
-                if let Some(tx) = startup_tx {
-                    if tx.send(()).is_err() {
-                        return;
-                    }
+                if let Some(tx) = startup_tx
+                    && tx.send(()).is_err()
+                {
+                    return;
                 }
                 read_dir_spec_iter.par_bridge().for_each_with(
                     run_context,
@@ -224,12 +224,10 @@ fn multi_threaded_walk_dir<C: ClientState>(
 
     let send_ok = run_context.send_read_dir_result(ordered_read_dir_result);
 
-    if send_ok {
-        if let Some(weighted_children_specs) = weighted_children_specs {
-            for each in weighted_children_specs {
-                if !run_context.schedule_read_dir_spec(each) {
-                    break;
-                }
+    if send_ok && let Some(weighted_children_specs) = weighted_children_specs {
+        for each in weighted_children_specs {
+            if !run_context.schedule_read_dir_spec(each) {
+                break;
             }
         }
     }

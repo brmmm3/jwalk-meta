@@ -2,7 +2,7 @@
 #![allow(unused_imports)]
 
 use std::cmp;
-use std::fs::{create_dir_all, File, Metadata};
+use std::fs::{File, Metadata, create_dir_all};
 use std::hint::black_box;
 use std::io::{self, ErrorKind, Read};
 use std::path::Path;
@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::sync::mpsc;
 
-use criterion::{criterion_group, criterion_main, Criterion};
+use criterion::{Criterion, criterion_group, criterion_main};
 use flate2::read::GzDecoder;
 use ignore::WalkBuilder;
 use num_cpus;

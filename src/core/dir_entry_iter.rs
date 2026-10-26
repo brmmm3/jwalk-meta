@@ -1,6 +1,6 @@
 use std::iter::Peekable;
-use std::sync::atomic::Ordering as AtomicOrdering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering as AtomicOrdering;
 use std::vec;
 
 use super::*;

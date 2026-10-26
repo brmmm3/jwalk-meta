@@ -34,8 +34,8 @@ pub(crate) mod linux_io_uring;
 pub(crate) mod unix_dir_enum;
 
 use rayon::prelude::*;
-use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use index_path::*;
 use ordered::*;
@@ -46,9 +46,9 @@ use run_context::RunContext;
 
 pub use dir_entry::DirEntry;
 pub use dir_entry_iter::DirEntryIter;
-pub(crate) use error::is_transient_error;
 pub use error::Error;
-pub use metadata::{get_metadata_ext, AncestorIdentity, MetaData, MetaDataExt};
+pub(crate) use error::is_transient_error;
+pub use metadata::{AncestorIdentity, MetaData, MetaDataExt, get_metadata_ext};
 pub use read_dir::ReadDir;
 pub(crate) use read_dir_iter::StreamingContext;
 pub use read_dir_spec::ReadDirSpec;
@@ -56,8 +56,8 @@ pub(crate) use weighted::Weighted;
 
 #[cfg(windows)]
 pub(crate) use nt_dir_enum::{
-    batch_query_nlinks, detect_fs_type_and_vol_serial, enumerate_dir, enumerate_dir_streaming,
-    DirEntryInfo,
+    DirEntryInfo, batch_query_nlinks, detect_fs_type_and_vol_serial, enumerate_dir,
+    enumerate_dir_streaming,
 };
 
 use crate::{ClientState, Parallelism};

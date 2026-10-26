@@ -135,10 +135,10 @@ where
 
             // Check whether the buffer contains the target element.
             let looking_for = &self.ordered_matcher.looking_for;
-            if let Some(top_ordered) = self.receive_buffer.peek() {
-                if top_ordered.index_path.eq(looking_for) {
-                    break;
-                }
+            if let Some(top_ordered) = self.receive_buffer.peek()
+                && top_ordered.index_path.eq(looking_for)
+            {
+                break;
             }
 
             if self.ordered_matcher.is_none() {
@@ -163,12 +163,12 @@ where
                 Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
                     self.drain_channel();
                     // Return looking_for first to preserve correctness.
-                    if let Some(top) = self.receive_buffer.peek() {
-                        if top.index_path.eq(&self.ordered_matcher.looking_for) {
-                            let ordered = self.receive_buffer.pop().unwrap();
-                            self.ordered_matcher.advance_past(&ordered);
-                            return Ok(ordered);
-                        }
+                    if let Some(top) = self.receive_buffer.peek()
+                        && top.index_path.eq(&self.ordered_matcher.looking_for)
+                    {
+                        let ordered = self.receive_buffer.pop().unwrap();
+                        self.ordered_matcher.advance_past(&ordered);
+                        return Ok(ordered);
                     }
                     // After channel disconnect, drain remaining elements in heap order (natural DFS order).
                     if let Some(fallback) = self.receive_buffer.pop() {

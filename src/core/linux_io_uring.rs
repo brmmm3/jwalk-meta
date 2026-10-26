@@ -26,7 +26,7 @@
 // io-uring 0.7.x prebuilt sys.rs architecture allowlist (upstream src/sys/mod.rs:18-33); other targets trigger compile_error.
 
 use crate::core::unix_dir_enum::{LinuxDirEntryOwned, LinuxStatxResults};
-use io_uring::{opcode, types, IoUring};
+use io_uring::{IoUring, opcode, types};
 use std::ffi::CString;
 use std::io;
 use std::mem::MaybeUninit;

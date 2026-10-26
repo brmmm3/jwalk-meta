@@ -130,7 +130,7 @@ use std::sync::Arc;
 
 #[cfg(not(all(target_os = "linux", feature = "legacy-read-dir")))]
 use crate::core::Weighted;
-use crate::core::{get_metadata_ext, AncestorIdentity, ReadDir, ReadDirSpec}; // Used only by the streaming getdents64 path.
+use crate::core::{AncestorIdentity, ReadDir, ReadDirSpec, get_metadata_ext}; // Used only by the streaming getdents64 path.
 
 pub use crate::core::{DirEntry, DirEntryIter, Error, MetaData, MetaDataExt};
 pub use rayon;
@@ -1164,6 +1164,7 @@ fn read_dir_windows<C: ClientState>(
 /// - Linux: use `read_dir_linux_via_getdents` (direct getdents64 + fstatat + optional streaming dispatch).
 /// - Other Unix platforms (macOS/BSD): use `read_dir_unix_fs_legacy` (std::fs::read_dir; streaming is not supported).
 #[cfg(not(windows))]
+#[allow(clippy::too_many_arguments)]
 fn read_dir_unix<C: ClientState>(
     path: Arc<Path>,
     read_dir_depth: usize,
@@ -1329,6 +1330,7 @@ fn read_dir_unix_fs_legacy<C: ClientState>(
 /// 3. Use d_type to determine FileType without fstatat (fall back only for DT_UNKNOWN).
 /// 4. Use fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW) instead of fs::metadata to avoid path resolution.
 #[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
+#[allow(clippy::too_many_arguments)]
 fn read_dir_linux_via_getdents<C: ClientState>(
     path: Arc<Path>,
     read_dir_depth: usize,
@@ -1521,6 +1523,7 @@ fn read_dir_linux_via_getdents<C: ClientState>(
 /// - `read_metadata` / `read_metadata_ext` / `DT_UNKNOWN` trigger statx or fstatat.
 /// - If stat fields cannot be retrieved, fall back (infer FileType from d_type and leave metadata empty), matching the original read_dir_unix behavior.
 #[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
+#[allow(clippy::too_many_arguments)]
 fn make_dir_entry_linux<C: ClientState>(
     info: crate::core::unix_dir_enum::LinuxDirEntryOwned,
     depth: usize,
@@ -1590,6 +1593,7 @@ fn make_dir_entry_linux<C: ClientState>(
                             st_dev: linux_makedev(statx.stx_dev_major, statx.stx_dev_minor),
                             st_nlink: statx.stx_nlink as u64,
                             st_blksize: statx.stx_blksize as u64,
+                            #[allow(clippy::unnecessary_cast)]
                             st_blocks: statx.stx_blocks as u64,
                             st_uid: statx.stx_uid,
                             st_gid: statx.stx_gid,
@@ -1620,17 +1624,22 @@ fn make_dir_entry_linux<C: ClientState>(
                             // POSIX stat lacks birth time (stx_btime needs statx(2)).
                             created: None,
                             // POSIX change time always present in stat (same source as st_mtime).
-                            changed: time_to_systemtime(stat.st_ctime, stat.st_ctime_nsec),
-                            modified: time_to_systemtime(stat.st_mtime, stat.st_mtime_nsec),
-                            accessed: time_to_systemtime(stat.st_atime, stat.st_atime_nsec),
+                            #[allow(clippy::useless_conversion)]
+                            changed: time_to_systemtime(stat.st_ctime, stat.st_ctime_nsec.into()),
+                            #[allow(clippy::useless_conversion)]
+                            modified: time_to_systemtime(stat.st_mtime, stat.st_mtime_nsec.into()),
+                            #[allow(clippy::useless_conversion)]
+                            accessed: time_to_systemtime(stat.st_atime, stat.st_atime_nsec.into()),
                             permissions: Some(std::fs::Permissions::from_mode(mode)),
                         });
                     }
                     if read_metadata_ext {
                         entry_metadata_ext = Some(MetaDataExt {
                             st_mode: stat.st_mode,
-                            st_ino: stat.st_ino,
+                            #[allow(clippy::unnecessary_cast)]
+                            st_ino: stat.st_ino as u64,
                             st_dev: stat.st_dev,
+                            #[allow(clippy::unnecessary_cast)]
                             st_nlink: stat.st_nlink as u64,
                             st_blksize: stat.st_blksize as u64,
                             st_blocks: stat.st_blocks as u64,

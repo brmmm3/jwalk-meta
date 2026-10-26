@@ -133,12 +133,14 @@ fn open_dir_fd(path: &Path) -> io::Result<RawFd> {
 ///
 /// SAFETY: `fd` must be an open directory fd; `buf` must have `buf.len()` writable bytes.
 unsafe fn syscall_getdents64(fd: RawFd, buf: &mut [u8]) -> io::Result<libc::c_long> {
-    let n = libc::syscall(
-        libc::SYS_getdents64,
-        fd,
-        buf.as_mut_ptr() as *mut libc::c_void,
-        buf.len() as libc::size_t,
-    );
+    let n = unsafe {
+        libc::syscall(
+            libc::SYS_getdents64,
+            fd,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len() as libc::size_t,
+        )
+    };
     if n < 0 {
         Err(io::Error::last_os_error())
     } else {
@@ -156,8 +158,8 @@ unsafe fn parse_dirents(buf: &[u8], len: usize, mut on_entry: impl FnMut(u8, &Os
     let header_size = std::mem::size_of::<LinuxDirent64>();
     while offset + header_size <= len {
         // SAFETY: At least header_size bytes remain after offset. LinuxDirent64 is repr(C) and its fields have no padding.
-        let entry_ptr = buf.as_ptr().add(offset) as *const LinuxDirent64;
-        let entry = &*entry_ptr;
+        let entry_ptr = unsafe { buf.as_ptr().add(offset) as *const LinuxDirent64 };
+        let entry = unsafe { &*entry_ptr };
         let reclen = entry.d_reclen as usize;
         if reclen == 0 || offset + reclen > len {
             break;
@@ -165,9 +167,10 @@ unsafe fn parse_dirents(buf: &[u8], len: usize, mut on_entry: impl FnMut(u8, &Os
 
         // d_name starts at the fixed DIRENT_NAME_OFFSET after the header (kernel ABI, independent of struct layout).
         // SAFETY: getdents64 guarantees d_name is NUL-terminated and within reclen, so strlen cannot go out of bounds.
-        let name_ptr = buf.as_ptr().add(offset + DIRENT_NAME_OFFSET) as *const libc::c_char;
-        let name_len = libc::strlen(name_ptr);
-        let name_bytes = std::slice::from_raw_parts(name_ptr as *const u8, name_len);
+        let name_ptr =
+            unsafe { buf.as_ptr().add(offset + DIRENT_NAME_OFFSET) as *const libc::c_char };
+        let name_len = unsafe { libc::strlen(name_ptr) };
+        let name_bytes = unsafe { std::slice::from_raw_parts(name_ptr as *const u8, name_len) };
         let name = OsStr::from_bytes(name_bytes);
 
         on_entry(entry.d_type, name);
@@ -187,21 +190,23 @@ pub fn enumerate_dir_unix(
     let guard = DirFdGuard(fd);
     let mut entries = Vec::with_capacity(capacity);
 
-    let result = with_tls_buffer(|buf| loop {
-        let n = unsafe { syscall_getdents64(fd, buf)? };
-        if n == 0 {
-            break Ok(());
-        }
-        unsafe {
-            parse_dirents(buf, n as usize, |d_type, name| {
-                if name.as_bytes() == b"." || name.as_bytes() == b".." {
-                    return;
-                }
-                entries.push(LinuxDirEntryOwned {
-                    d_type,
-                    name: OsString::from(name),
+    let result = with_tls_buffer(|buf| {
+        loop {
+            let n = unsafe { syscall_getdents64(fd, buf)? };
+            if n == 0 {
+                break Ok(());
+            }
+            unsafe {
+                parse_dirents(buf, n as usize, |d_type, name| {
+                    if name.as_bytes() == b"." || name.as_bytes() == b".." {
+                        return;
+                    }
+                    entries.push(LinuxDirEntryOwned {
+                        d_type,
+                        name: OsString::from(name),
+                    });
                 });
-            });
+            }
         }
     });
 
@@ -224,29 +229,31 @@ pub fn enumerate_dir_unix_streaming(
     let guard = DirFdGuard(fd);
     let mut entries = Vec::with_capacity(capacity);
 
-    let result = with_tls_buffer(|buf| loop {
-        let n = unsafe { syscall_getdents64(fd, buf)? };
-        if n == 0 {
-            break Ok(());
-        }
-        unsafe {
-            parse_dirents(buf, n as usize, |d_type, name| {
-                if name.as_bytes() == b"." || name.as_bytes() == b".." {
-                    return;
-                }
-                let owned = LinuxDirEntryOwned {
-                    d_type,
-                    name: OsString::from(name),
-                };
+    let result = with_tls_buffer(|buf| {
+        loop {
+            let n = unsafe { syscall_getdents64(fd, buf)? };
+            if n == 0 {
+                break Ok(());
+            }
+            unsafe {
+                parse_dirents(buf, n as usize, |d_type, name| {
+                    if name.as_bytes() == b"." || name.as_bytes() == b".." {
+                        return;
+                    }
+                    let owned = LinuxDirEntryOwned {
+                        d_type,
+                        name: OsString::from(name),
+                    };
 
-                // DT_UNKNOWN is common on some network and synthetic filesystems. Resolve it
-                // here so streamed scheduling counts every real directory in the same order
-                // that ReadDir will later expose its child specs.
-                if entry_is_directory(fd, d_type, &owned.name) {
-                    on_subdir(&owned);
-                }
-                entries.push(owned);
-            });
+                    // DT_UNKNOWN is common on some network and synthetic filesystems. Resolve it
+                    // here so streamed scheduling counts every real directory in the same order
+                    // that ReadDir will later expose its child specs.
+                    if entry_is_directory(fd, d_type, &owned.name) {
+                        on_subdir(&owned);
+                    }
+                    entries.push(owned);
+                });
+            }
         }
     });
 

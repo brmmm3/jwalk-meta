@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use crate::{
-    get_metadata_ext, AncestorIdentity, ClientState, Error, MetaData, MetaDataExt, ReadDirSpec,
-    Result,
+    AncestorIdentity, ClientState, Error, MetaData, MetaDataExt, ReadDirSpec, Result,
+    get_metadata_ext,
 };
 
 /// Representation of a file or directory.
