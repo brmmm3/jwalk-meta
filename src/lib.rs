@@ -1,5 +1,4 @@
 #![warn(clippy::all)]
-#![cfg_attr(windows, feature(windows_by_handle))]
 #![cfg_attr(feature = "legacy-read-dir", allow(dead_code))]
 // legacy-read-dir is a benchmark-comparison feature. When enabled, Unix uses the fs::read_dir fallback,
 // leaving streaming-related code such as StreamingContext / read_dir_linux_via_getdents unused.
@@ -914,7 +913,7 @@ mod read_dir_windows_helpers {
             if need_nlink || need_vol {
                 if let Some(path) = win32_fallback_path {
                     if let Ok(m) = std::fs::symlink_metadata(path) {
-                        let ext = crate::core::get_metadata_ext(&m);
+                        let ext = crate::core::get_metadata_ext(&m, path);
                         (
                             info.number_of_links.or(ext.number_of_links),
                             info.volume_serial_number.or(ext.volume_serial_number),
@@ -1255,7 +1254,8 @@ fn read_dir_unix_fs_legacy<C: ClientState>(
             if read_metadata {
                 if let Ok(metadata) = fs_dir_entry.metadata() {
                     if read_metadata_ext {
-                        entry_metadata_ext = Some(get_metadata_ext(&metadata));
+                        entry_metadata_ext =
+                            Some(get_metadata_ext(&metadata, &fs_dir_entry.path()));
                     }
                     entry_metadata = Some(MetaData::from_fs_metadata(&metadata));
                 } else if let Ok(file_type) = fs_dir_entry.file_type() {
@@ -1282,7 +1282,7 @@ fn read_dir_unix_fs_legacy<C: ClientState>(
             } else if read_metadata_ext {
                 // P3: use symlink_metadata to avoid extra path-resolution overhead from following symlinks.
                 if let Ok(metadata) = fs::symlink_metadata(fs_dir_entry.path()) {
-                    entry_metadata_ext = Some(get_metadata_ext(&metadata));
+                    entry_metadata_ext = Some(get_metadata_ext(&metadata, &fs_dir_entry.path()));
                 }
             }
 

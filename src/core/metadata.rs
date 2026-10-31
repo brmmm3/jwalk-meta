@@ -6,18 +6,41 @@
 //! In stdlib imported code, warnings are allowed.
 
 use std::fs::{self, Permissions};
+#[cfg(windows)]
+use std::fs::{File, OpenOptions};
 #[cfg(unix)]
 use std::os::unix::fs::MetadataExt;
 #[cfg(windows)]
-use std::os::windows::fs::MetadataExt;
+use std::os::windows::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::io::AsRawHandle;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
+#[cfg(windows)]
+use windows::Win32::Foundation::HANDLE;
+#[cfg(windows)]
+use windows::Win32::Storage::FileSystem::{
+    BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_READ_ATTRIBUTES, GetFileInformationByHandle,
+};
+
+#[cfg(windows)]
+fn get_windows_file_info(file: &File) -> std::result::Result<BY_HANDLE_FILE_INFORMATION, String> {
+    let handle = HANDLE(file.as_raw_handle() as _);
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    unsafe {
+        GetFileInformationByHandle(handle, &mut info)
+            .map_err(|error| format!("Failed to read file handle info: {error}"))?;
+    }
+    Ok(info)
+}
 
 #[inline]
-pub fn get_metadata_ext(metadata: &fs::Metadata) -> MetaDataExt {
+pub fn get_metadata_ext(metadata: &fs::Metadata, path: &Path) -> MetaDataExt {
     #[cfg(unix)]
     {
+        let _ = path;
         MetaDataExt {
             st_mode: metadata.mode(),
             st_ino: metadata.ino(),
@@ -32,11 +55,34 @@ pub fn get_metadata_ext(metadata: &fs::Metadata) -> MetaDataExt {
     }
     #[cfg(windows)]
     {
+        let reparse_flag = if metadata.file_type().is_symlink() {
+            FILE_FLAG_OPEN_REPARSE_POINT.0
+        } else {
+            0
+        };
+        let info = OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES.0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS.0 | reparse_flag)
+            .open(path)
+            .ok()
+            .and_then(|file| get_windows_file_info(&file).ok());
         MetaDataExt {
-            file_attributes: metadata.file_attributes(),
-            volume_serial_number: metadata.volume_serial_number(),
-            number_of_links: metadata.number_of_links(),
-            file_index: metadata.file_index(),
+            file_attributes: info.as_ref().map_or_else(
+                || {
+                    (if metadata.is_dir() { 0x10 } else { 0 })
+                        | (if metadata.file_type().is_symlink() {
+                            0x400
+                        } else {
+                            0
+                        })
+                },
+                |info| info.dwFileAttributes,
+            ),
+            volume_serial_number: info.as_ref().map(|info| info.dwVolumeSerialNumber),
+            number_of_links: info.as_ref().map(|info| info.nNumberOfLinks),
+            file_index: info
+                .as_ref()
+                .map(|info| ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64),
         }
     }
 }
@@ -173,7 +219,7 @@ impl AncestorIdentity {
     /// Return None if metadata retrieval fails (conservative policy: skip loop detection for this ancestor).
     pub fn from_path(path: Arc<Path>) -> Option<Self> {
         let meta = fs::symlink_metadata(path.as_ref()).ok()?;
-        let ext = get_metadata_ext(&meta);
+        let ext = get_metadata_ext(&meta, path.as_ref());
         Some(AncestorIdentity {
             path,
             volume_serial_number: ext.volume_serial_number,

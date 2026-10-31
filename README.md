@@ -37,7 +37,7 @@ Before optimization, the first 265 seconds of scanning the same directory produc
 jwalk-meta = "1.0"
 ```
 
-The Rust nightly toolchain is required.
+The stable Rust toolchain is supported.
 
 ## Usage
 
@@ -109,4 +109,9 @@ for entry in WalkDir::new("foo")
 
 ## License
 
-MIT
+Licensed under either of
+
+- [MIT](LICENSE)
+- [Apache License, Version 2.0](LICENSE-APACHE)
+
+at your option.

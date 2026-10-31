@@ -393,9 +393,9 @@ mod tests {
         unsafe { libc::close(fd) };
 
         // All statx results should be None (CQE errors).
-        for i in 0..entries.len() {
+        for (i, result) in statx_results.results.iter().enumerate().take(entries.len()) {
             assert!(
-                statx_results.results[i].is_none(),
+                result.is_none(),
                 "entry {} should have None statx (expected CQE error)",
                 i
             );
@@ -404,13 +404,19 @@ mod tests {
 
     #[test]
     fn test_min_batch_constant_nonzero() {
-        assert!(MIN_BATCH_FOR_IO_URING >= 1);
+        const {
+            assert!(MIN_BATCH_FOR_IO_URING >= 1);
+        }
     }
 
     #[test]
     fn test_ring_size_constant_reasonable() {
-        assert!(RING_SIZE >= 64);
-        assert!(RING_SIZE <= 4096);
+        const {
+            assert!(RING_SIZE >= 64);
+        }
+        const {
+            assert!(RING_SIZE <= 4096);
+        };
     }
 
     /// Verify that io_uring_enabled is idempotent (OnceLock ensures it is probed only once).

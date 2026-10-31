@@ -938,7 +938,11 @@ fn combine_with_rayon_no_lockup_1() {
 
 #[test]
 fn combine_with_rayon_no_lockup_2() {
-    WalkDir::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+    let dir = Dir::tmp();
+    dir.mkdirp("nested");
+    dir.touch_all(&["a.txt", "nested/b.txt"]);
+
+    WalkDir::new(dir.path())
         .sort(true)
         .into_iter()
         .par_bridge()
@@ -1042,8 +1046,26 @@ lazy_static! {
     static ref RELATIVE_MUTEX: Mutex<()> = Mutex::new(());
 }
 
+fn run_in_isolated_process(test_name: &str) -> bool {
+    const CHILD_MARKER: &str = "JWALK_META_CWD_TEST_CHILD";
+    if env::var_os(CHILD_MARKER).is_some() {
+        return false;
+    }
+
+    let status = std::process::Command::new(env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD_MARKER, "1")
+        .status()
+        .unwrap();
+    assert!(status.success(), "isolated {test_name} test failed");
+    true
+}
+
 #[test]
 fn walk_relative_1() {
+    if run_in_isolated_process("walk_relative_1") {
+        return;
+    }
     let _shared = RELATIVE_MUTEX.lock().unwrap();
     let (test_dir, _temp_dir) = test_dir();
 
@@ -1071,10 +1093,13 @@ fn walk_relative_1() {
 
 #[test]
 fn walk_relative_2() {
+    if run_in_isolated_process("walk_relative_2") {
+        return;
+    }
     let _shared = RELATIVE_MUTEX.lock().unwrap();
     let (test_dir, _temp_dir) = test_dir();
 
-    env::set_current_dir(&test_dir.join("group 1")).unwrap();
+    env::set_current_dir(test_dir.join("group 1")).unwrap();
 
     let paths = local_paths(WalkDir::new("..").sort(true).skip_hidden(true));
 
@@ -1126,10 +1151,10 @@ fn filter_group_children_with_process_read_dir() {
             // Filter group children
             .process_read_dir(|_depth, _path, _parent, children| {
                 children.iter_mut().for_each(|each_result| {
-                    if let Ok(each) = each_result {
-                        if each.file_name.to_string_lossy().starts_with("group") {
-                            each.read_children_path = None;
-                        }
+                    if let Ok(each) = each_result
+                        && each.file_name.to_string_lossy().starts_with("group")
+                    {
+                        each.read_children_path = None;
                     }
                 });
             }),

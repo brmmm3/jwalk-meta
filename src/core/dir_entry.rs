@@ -121,7 +121,7 @@ impl<C: ClientState> DirEntry<C> {
         if read_metadata {
             entry_metadata = Some(MetaData::from_fs_metadata(&metadata));
             if read_metadata_ext {
-                entry_metadata_ext = Some(get_metadata_ext(&metadata));
+                entry_metadata_ext = Some(get_metadata_ext(&metadata, path));
             } else {
                 entry_metadata_ext = None;
             }
@@ -318,7 +318,7 @@ impl<C: ClientState> DirEntry<C> {
             // Unix: the (dev, ino) pair uniquely identifies a filesystem object.
             // Windows: the (volume_serial_number, file_index) pair uniquely identifies a filesystem object.
             if let Ok(target_meta) = fs::metadata(&canonical_target) {
-                let target_ext = get_metadata_ext(&target_meta);
+                let target_ext = get_metadata_ext(&target_meta, &canonical_target);
 
                 // Compare precomputed ancestor identities in memory, avoiding O(depth) stat calls.
                 if let Some(ancestors) = &self.follow_link_ancestors {

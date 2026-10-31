@@ -13,10 +13,8 @@ use std::sync::mpsc;
 use criterion::{Criterion, criterion_group, criterion_main};
 use flate2::read::GzDecoder;
 use ignore::WalkBuilder;
-use num_cpus;
 use rayon::prelude::*;
 use tar::Archive;
-use walkdir;
 
 use jwalk_meta::{Error, Parallelism, WalkDir, WalkDirGeneric};
 
@@ -67,7 +65,7 @@ fn download_and_unpack_linux_kernel() -> Result<(), io::Error> {
     let linux_kernel_archive = linux_kernel_archive();
     if !linux_kernel_archive.exists() {
         // Download linux kernel
-        download_linux_kernel().map_err(|e| io::Error::new(ErrorKind::Other, e.to_string()))?;
+        download_linux_kernel().map_err(|e| io::Error::other(e.to_string()))?;
     }
     let linux_dir = linux_dir();
     if !linux_dir.exists() {
@@ -96,11 +94,17 @@ fn walk_benches(c: &mut Criterion) {
     download_and_unpack_linux_kernel().unwrap();
 
     c.bench_function("rayon (unsorted, n threads)", |b| {
-        b.iter(|| black_box(rayon_recursive_descent(linux_dir(), None, false)))
+        b.iter(|| {
+            let _: () = rayon_recursive_descent(linux_dir(), None, false);
+            black_box(())
+        })
     });
 
     c.bench_function("rayon (unsorted, metadata, n threads)", |b| {
-        b.iter(|| black_box(rayon_recursive_descent(linux_dir(), None, true)))
+        b.iter(|| {
+            let _: () = rayon_recursive_descent(linux_dir(), None, true);
+            black_box(())
+        })
     });
 
     c.bench_function("jwalk (unsorted, n threads)", |b| {
@@ -204,7 +208,7 @@ fn walk_benches(c: &mut Criterion) {
                     })
                 });
             let mut metadatas: Vec<_> = rx.into_iter().collect();
-            metadatas.sort_by(|a, b| a.len().cmp(&b.len()))
+            metadatas.sort_by_key(|a| a.len())
         })
     });
 
@@ -227,7 +231,7 @@ fn walk_benches(c: &mut Criterion) {
                     })
                 });
             let mut metadatas: Vec<_> = rx.into_iter().collect();
-            metadatas.sort_by(|a, b| a.len().cmp(&b.len()))
+            metadatas.sort_by_key(|a| a.len())
         })
     });
 

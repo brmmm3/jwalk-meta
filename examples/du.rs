@@ -6,7 +6,7 @@ use jwalk_meta::{Parallelism, WalkDirGeneric};
 use std::env;
 
 fn main() {
-    let path = env::args().skip(1).next().unwrap_or("./".to_owned());
+    let path = env::args().nth(1).unwrap_or("./".to_owned());
     let mut total: u64 = 0;
 
     let start = Instant::now();
@@ -15,11 +15,11 @@ fn main() {
         .parallelism(Parallelism::RayonNewPool(4))
         .process_read_dir(|_, _, _, dir_entry_results| {
             dir_entry_results.iter_mut().for_each(|dir_entry_result| {
-                if let Ok(dir_entry) = dir_entry_result {
-                    if !dir_entry.file_type.is_dir() {
-                        dir_entry.client_state =
-                            Some(dir_entry.metadata().map(|m| m.len()).unwrap_or_default());
-                    }
+                if let Ok(dir_entry) = dir_entry_result
+                    && !dir_entry.file_type.is_dir()
+                {
+                    dir_entry.client_state =
+                        Some(dir_entry.metadata().map(|m| m.len()).unwrap_or_default());
                 }
             })
         })

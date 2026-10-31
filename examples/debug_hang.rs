@@ -26,7 +26,7 @@ fn main() {
         match iter.next() {
             Some(Ok(entry)) => {
                 let c = counter_clone.fetch_add(1, Ordering::Relaxed) + 1;
-                if c <= 5 || c % 1000 == 0 {
+                if c <= 5 || c.is_multiple_of(1000) {
                     println!(
                         "[DEBUG] Entry #{}: {:?} (depth={}) at {:?}",
                         c,
