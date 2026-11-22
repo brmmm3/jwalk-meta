@@ -240,3 +240,65 @@ impl Default for OrderedMatcher {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn waits_for_missing_head_and_preserves_order() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (queue, mut iter) = new_ordered_queue(stop, 4, 1);
+        queue
+            .push(Ordered::new("child", IndexPath::new(smallvec![0, 0]), 0))
+            .unwrap();
+        assert!(matches!(iter.try_next_strict(), Err(TryRecvError::Empty)));
+        queue
+            .push(Ordered::new("root", IndexPath::new(smallvec![0]), 1))
+            .unwrap();
+        assert_eq!(iter.next().unwrap().value, "root");
+        assert_eq!(iter.next().unwrap().value, "child");
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn stopping_queue_interrupts_iteration() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (queue, mut iter) = new_ordered_queue::<()>(stop.clone(), 1, 1);
+        stop.store(true, AtomicOrdering::Release);
+        assert!(iter.next().is_none());
+        drop(queue);
+    }
+
+    #[test]
+    fn ordered_results_compare_by_path_not_payload() {
+        use std::cmp::Ordering;
+        let first = Ordered::new("first", IndexPath::new(smallvec![0]), 0);
+        let same_path = Ordered::new("different", IndexPath::new(smallvec![0]), 2);
+        let second = Ordered::new("second", IndexPath::new(smallvec![1]), 0);
+        assert!(first == same_path);
+        assert!(first != second);
+        assert_eq!(first.partial_cmp(&second), Some(Ordering::Greater));
+        assert_eq!(first.cmp(&same_path), Ordering::Equal);
+    }
+
+    #[test]
+    fn closing_empty_queue_ends_iteration() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (queue, mut iter) = new_ordered_queue::<()>(stop, 1, 1);
+        drop(queue);
+        assert!(iter.next().is_none());
+    }
+
+    #[test]
+    fn closing_queue_returns_buffered_results() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (queue, mut iter) = new_ordered_queue(stop, 4, 1);
+        queue
+            .push(Ordered::new("later", IndexPath::new(smallvec![1]), 0))
+            .unwrap();
+        drop(queue);
+        assert_eq!(iter.next().unwrap().value, "later");
+        assert!(iter.next().is_none());
+    }
+}

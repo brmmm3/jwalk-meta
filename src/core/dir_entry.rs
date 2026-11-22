@@ -116,19 +116,8 @@ impl<C: ClientState> DirEntry<C> {
             None
         };
 
-        let entry_metadata;
-        let entry_metadata_ext;
-        if read_metadata {
-            entry_metadata = Some(MetaData::from_fs_metadata(&metadata));
-            if read_metadata_ext {
-                entry_metadata_ext = Some(get_metadata_ext(&metadata, path));
-            } else {
-                entry_metadata_ext = None;
-            }
-        } else {
-            entry_metadata = None;
-            entry_metadata_ext = None;
-        }
+        let entry_metadata = read_metadata.then(|| MetaData::from_fs_metadata(&metadata));
+        let entry_metadata_ext = read_metadata_ext.then(|| get_metadata_ext(&metadata, path));
 
         Ok(DirEntry {
             depth,
@@ -364,5 +353,54 @@ impl<C: ClientState> DirEntry<C> {
 impl<C: ClientState> fmt::Debug for DirEntry<C> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "DirEntry({:?})", self.path())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn std_entry_preserves_type_and_path() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("child")).unwrap();
+        fs::write(dir.path().join("file"), b"data").unwrap();
+        for entry in fs::read_dir(dir.path()).unwrap() {
+            let entry = entry.unwrap();
+            let actual = DirEntry::<((), ())>::from_entry(
+                1,
+                Arc::from(dir.path()),
+                None,
+                None,
+                &entry,
+                None,
+            )
+            .unwrap();
+            assert_eq!(actual.path(), entry.path());
+            assert_eq!(actual.file_type(), entry.file_type().unwrap());
+            assert_eq!(
+                actual.read_children_path.is_some(),
+                actual.file_type().is_dir()
+            );
+            assert!(
+                format!("{actual:?}").contains(&actual.file_name.to_string_lossy().to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn metadata_error_contains_entry_path_and_depth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("removed");
+        fs::write(&path, b"data").unwrap();
+        let entry = DirEntry::<((), ())>::from_path(3, &path, false, false, false, None).unwrap();
+        fs::remove_file(&path).unwrap();
+        let error = entry.metadata().unwrap_err();
+        assert_eq!(error.path(), Some(path.as_path()));
+        assert_eq!(error.depth(), 3);
+        assert_eq!(
+            error.io_error().unwrap().kind(),
+            std::io::ErrorKind::NotFound
+        );
     }
 }

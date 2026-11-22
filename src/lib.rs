@@ -1,7 +1,7 @@
 #![warn(clippy::all)]
 #![cfg_attr(feature = "legacy-read-dir", allow(dead_code))]
 // legacy-read-dir is a benchmark-comparison feature. When enabled, Unix uses the fs::read_dir fallback,
-// leaving streaming-related code such as StreamingContext / read_dir_linux_via_getdents unused.
+// leaving streaming-related code such as StreamingContext / read_dir_linux unused.
 // These warnings are expected (an inevitable result of feature switching), so suppress them globally.
 
 //! Filesystem walk.
@@ -129,7 +129,7 @@ use std::sync::Arc;
 
 #[cfg(not(all(target_os = "linux", feature = "legacy-read-dir")))]
 use crate::core::Weighted;
-use crate::core::{AncestorIdentity, ReadDir, ReadDirSpec, get_metadata_ext}; // Used only by the streaming getdents64 path.
+use crate::core::{AncestorIdentity, ReadDir, ReadDirSpec, get_metadata_ext};
 
 pub use crate::core::{DirEntry, DirEntryIter, Error, MetaData, MetaDataExt};
 pub use rayon;
@@ -251,7 +251,7 @@ struct WalkDirOptions<C: ClientState> {
     /// Requires an additional O(N) syscall (NtQueryInformationByName); effective on Windows only.
     /// Defaults to false. This option is meaningful only when read_metadata_ext=true.
     read_hardlink_info: bool,
-    /// Preallocated capacity for the NT enumeration result Vec (Windows only).
+    /// Preallocated capacity for the directory enumeration result Vec.
     /// Increase it to reduce reallocations for large directories, or decrease it to save memory for small ones. Defaults to 512.
     dir_entry_capacity: usize,
     parallelism: Parallelism,
@@ -259,11 +259,7 @@ struct WalkDirOptions<C: ClientState> {
     process_read_dir: Option<Arc<ProcessReadDirFunction<C>>>,
     /// Maximum retries for transient I/O errors. Defaults to 3; set to 0 to disable retries.
     max_retries: u8,
-    /// Capacity of the internal channels (shared by PriorityQueue and OrderedQueue).
-    ///
-    /// crossbeam `bounded(N)` preallocates N slots on creation, about 128-136 bytes per slot.
-    /// Defaults to 4096 (about 0.5 MB/channel), enough to keep the pipeline full.
-    /// The previous default of 524288 (about 68 MB/channel) used too much memory.
+    /// Capacity of the ordered result channel.
     channel_capacity: usize,
     /// Maximum capacity of OrderedQueue's receive_buffer.
     ///
@@ -417,7 +413,7 @@ impl<C: ClientState> WalkDirGeneric<C> {
     /// Set the pre-allocated capacity for the directory entry result vector.
     ///
     /// This controls the initial `Vec::with_capacity()` used when enumerating
-    /// directory entries via the NT Native API (Windows only). For directories
+    /// directory entries on Linux or via the NT Native API on Windows. For directories
     /// with many files (e.g. 10000+), increasing this value reduces Vec
     /// re-allocations. For small directories, decreasing it saves memory.
     /// Defaults to `512`.
@@ -475,16 +471,10 @@ impl<C: ClientState> WalkDirGeneric<C> {
         self
     }
 
-    /// Set the capacity of the internal channels (shared by PriorityQueue and OrderedQueue).
+    /// Set the capacity of the ordered result channel (default: 4096).
     ///
-    /// crossbeam `bounded(N)` preallocates N slots on creation (about 128-136 bytes each).
-    /// Defaults to 4096 (about 0.5 MB/channel), enough to keep the pipeline full.
-    ///
-    /// **Memory impact**: 2 channels × N × 136 B, or `channel_capacity × 272 B`.
-    /// - 4096 (default) -> about 1 MB.
-    /// - 524288 (previous default) -> about 136 MB.
-    ///
-    /// **Performance impact**: too small a value briefly blocks producers, but has minimal effect on throughput (< 2%).
+    /// Zero uses a rendezvous channel. The work queue is unbounded so workers
+    /// cannot deadlock while scheduling children.
     pub fn channel_capacity(mut self, capacity: usize) -> Self {
         self.options.channel_capacity = capacity;
         self
@@ -553,21 +543,8 @@ impl<C: ClientState> IntoIterator for WalkDirGeneric<C> {
         let max_receive_buffer_size = self.options.max_receive_buffer_size;
         let process_read_dir = self.options.process_read_dir;
         let mut root_read_dir_state = self.options.root_read_dir_state;
-        let follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>> = if follow_links {
-            // The root entry's identity was already stat'ed in from_path; precompute it here.
-            AncestorIdentity::from_path(Arc::from(self.root.as_path())).map(|id| Arc::new(vec![id]))
-        } else {
-            None
-        };
-
-        let root_entry = DirEntry::from_path(
-            0,
-            &self.root,
-            read_metadata,
-            read_metadata_ext,
-            false,
-            follow_link_ancestors,
-        );
+        let root_entry =
+            DirEntry::from_path(0, &self.root, read_metadata, read_metadata_ext, false, None);
         let root_parent_path = root_entry
             .as_ref()
             .map(|root| root.parent_path().to_owned())
@@ -702,27 +679,20 @@ impl Parallelism {
             Parallelism::Serial => op(),
             Parallelism::RayonDefaultPool { .. } => rayon::spawn(op),
             Parallelism::RayonNewPool(num_threads) => {
-                // Reuse a TLS thread pool: all WalkDir instances on the same thread share one
-                // ThreadPool, avoiding the overhead of repeatedly creating and destroying pools.
-                // The pool is dropped with the host thread; rayon::ThreadPool::drop waits for
-                // all worker threads to finish before releasing resources.
                 thread_local! {
-                    static TLS_POOL: std::cell::RefCell<Option<rayon::ThreadPool>> = const { std::cell::RefCell::new(None) };
+                    static TLS_POOLS: std::cell::RefCell<std::collections::HashMap<usize, rayon::ThreadPool>> =
+                        std::cell::RefCell::new(std::collections::HashMap::new());
                 }
-                TLS_POOL.with(|cell| {
-                    let mut pool_opt = cell.borrow_mut();
-                    if pool_opt.is_none() {
+                TLS_POOLS.with(|cell| {
+                    let mut pools = cell.borrow_mut();
+                    let pool = pools.entry(*num_threads).or_insert_with(|| {
                         let mut builder = rayon::ThreadPoolBuilder::new();
                         if *num_threads > 0 {
                             builder = builder.num_threads(*num_threads);
                         }
-                        *pool_opt = builder.build().ok();
-                    }
-                    if let Some(pool) = pool_opt.as_ref() {
-                        pool.spawn(op);
-                    } else {
-                        rayon::spawn(op);
-                    }
+                        builder.build().expect("failed to create Rayon thread pool")
+                    });
+                    pool.spawn(op);
                 })
             }
             Parallelism::RayonExistingPool { pool, .. } => pool.spawn(op),
@@ -1160,7 +1130,7 @@ fn read_dir_windows<C: ClientState>(
 
 /// Unix directory-enumeration dispatcher.
 ///
-/// - Linux: use `read_dir_linux_via_getdents` (direct getdents64 + fstatat + optional streaming dispatch).
+/// - Linux: use `read_dir_linux` (std enumeration + relative stat + optional streaming dispatch).
 /// - Other Unix platforms (macOS/BSD): use `read_dir_unix_fs_legacy` (std::fs::read_dir; streaming is not supported).
 #[cfg(not(windows))]
 #[allow(clippy::too_many_arguments)]
@@ -1180,10 +1150,10 @@ fn read_dir_unix<C: ClientState>(
     streaming_ctx: Option<crate::core::StreamingContext<C>>,
     dir_entry_capacity: usize,
 ) -> Result<ReadDir<C>> {
-    // Linux with the legacy feature disabled: use the direct getdents64 path.
+    // Linux with the legacy feature disabled: use streaming and relative metadata queries.
     #[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
     {
-        read_dir_linux_via_getdents(
+        read_dir_linux(
             path,
             read_dir_depth,
             read_dir_contents_depth,
@@ -1322,16 +1292,10 @@ fn read_dir_unix_fs_legacy<C: ClientState>(
     Ok(ReadDir::new(client_read_state, dir_entry_results))
 }
 
-/// Direct Linux getdents64 path: fetch entries in one syscall with optional streaming subdirectory dispatch.
-///
-/// Matches the Windows `read_dir_windows` pattern:
-/// 1. `streaming_ctx.is_some() && !sort && process_read_dir.is_none()` selects the streaming path.
-/// 2. Otherwise, use the non-streaming collect path.
-/// 3. Use d_type to determine FileType without fstatat (fall back only for DT_UNKNOWN).
-/// 4. Use fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW) instead of fs::metadata to avoid path resolution.
+/// Linux enumeration with optional streaming dispatch and relative metadata queries.
 #[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
 #[allow(clippy::too_many_arguments)]
-fn read_dir_linux_via_getdents<C: ClientState>(
+fn read_dir_linux<C: ClientState>(
     path: Arc<Path>,
     read_dir_depth: usize,
     read_dir_contents_depth: usize,
@@ -1371,8 +1335,7 @@ fn read_dir_linux_via_getdents<C: ClientState>(
             if ctx.is_stopped() {
                 return;
             }
-            // enumerate_dir_unix_streaming invokes this only for entries known to be
-            // directories, including DT_UNKNOWN entries verified with fstatat.
+            // enumerate_dir_unix_streaming invokes this only for directories.
             if skip_hidden && is_hidden(&info.name) {
                 return;
             }
@@ -1420,7 +1383,7 @@ fn read_dir_linux_via_getdents<C: ClientState>(
         }
     };
 
-    // DirEntry construction: d_type determines the type directly; read_metadata/read_metadata_ext/DT_UNKNOWN trigger fstatat.
+    // The standard library provides the file type; requested metadata uses relative stat calls.
     let dirfd = guard.as_raw_fd();
 
     // ── Batched STATX dispatch via io_uring (NetworkAsync path) ──────────────────
@@ -1443,9 +1406,7 @@ fn read_dir_linux_via_getdents<C: ClientState>(
     // without referencing any symbols in linux_io_uring (an unresolved module would fail compilation).
     {
         use crate::core::fs_detect::IoStrategy;
-        let need_meta_or_type = read_metadata
-            || read_metadata_ext
-            || entries.iter().any(|e| e.d_type == libc::DT_UNKNOWN);
+        let need_meta_or_type = read_metadata || read_metadata_ext;
         if need_meta_or_type && entries.len() >= crate::core::linux_io_uring::MIN_BATCH_FOR_IO_URING
         {
             // fstat the already-open directory descriptor to obtain st_dev for the per-worker
@@ -1512,16 +1473,12 @@ fn read_dir_linux_via_getdents<C: ClientState>(
     Ok(read_dir)
 }
 
-/// Construct DirEntry from LinuxDirEntryOwned (Linux getdents64 path only).
+/// Construct DirEntry from LinuxDirEntryOwned.
 ///
 /// Metadata retrieval priority:
 /// 1. Batched STATX prefetch via io_uring (NetworkAsync path).
 /// 2. `fstatat(dirfd, name, AT_SYMLINK_NOFOLLOW)` (LocalSync / fallback if io_uring fails).
-/// 3. Infer from d_type (leave metadata empty if both statx and fstatat fail).
-///
-/// - Use `d_type` to determine FileType directly (avoiding fstatat).
-/// - `read_metadata` / `read_metadata_ext` / `DT_UNKNOWN` trigger statx or fstatat.
-/// - If stat fields cannot be retrieved, fall back (infer FileType from d_type and leave metadata empty), matching the original read_dir_unix behavior.
+/// 3. Leave metadata empty if both statx and fstatat fail.
 #[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
 #[allow(clippy::too_many_arguments)]
 fn make_dir_entry_linux<C: ClientState>(
@@ -1534,14 +1491,11 @@ fn make_dir_entry_linux<C: ClientState>(
     statx: crate::core::unix_dir_enum::LinuxStatxResult,
     follow_link_ancestors: Option<Arc<Vec<AncestorIdentity>>>,
 ) -> Result<DirEntry<C>> {
-    use crate::core::unix_dir_enum::{file_type_from_dtype, file_type_from_mode, fstatat_metadata};
+    use crate::core::unix_dir_enum::fstatat_metadata;
     use std::os::unix::fs::PermissionsExt;
 
-    let need_stat = read_metadata || read_metadata_ext || info.d_type == libc::DT_UNKNOWN;
-
-    // d_type -> FileType (fall back to S_IFREG for DT_UNKNOWN; overwritten if statx/fstatat succeeds below).
-    let mut file_type =
-        file_type_from_dtype(info.d_type).unwrap_or_else(|| file_type_from_mode(libc::S_IFREG));
+    let need_stat = read_metadata || read_metadata_ext;
+    let file_type = info.file_type;
 
     let mut entry_metadata = None;
     let mut entry_metadata_ext = None;
@@ -1551,10 +1505,8 @@ fn make_dir_entry_linux<C: ClientState>(
     // where try_fill_from_statx is a stub (returns false) and automatically falls back to fstatat below.
     let statx_filled = try_fill_from_statx(
         statx,
-        info.d_type,
         read_metadata,
         read_metadata_ext,
-        &mut file_type,
         &mut entry_metadata,
         &mut entry_metadata_ext,
     );
@@ -1566,9 +1518,6 @@ fn make_dir_entry_linux<C: ClientState>(
             match crate::core::unix_dir_enum::statx_metadata(dirfd, &info.name) {
                 Ok(statx) => {
                     let mode = statx.stx_mode as libc::mode_t;
-                    if info.d_type == libc::DT_UNKNOWN {
-                        file_type = file_type_from_mode(mode);
-                    }
                     if read_metadata {
                         entry_metadata = Some(MetaData {
                             is_dir: (mode & libc::S_IFMT) == libc::S_IFDIR,
@@ -1611,9 +1560,6 @@ fn make_dir_entry_linux<C: ClientState>(
             // fstatat fallback (musl target or statx call failure).
             match fstatat_metadata(dirfd, &info.name) {
                 Ok(stat) => {
-                    if info.d_type == libc::DT_UNKNOWN {
-                        file_type = file_type_from_mode(stat.st_mode);
-                    }
                     if read_metadata {
                         let mode = stat.st_mode;
                         entry_metadata = Some(MetaData {
@@ -1678,22 +1624,16 @@ fn make_dir_entry_linux<C: ClientState>(
 ))]
 fn try_fill_from_statx(
     statx_result: crate::core::unix_dir_enum::LinuxStatxResult,
-    d_type: u8,
     read_metadata: bool,
     read_metadata_ext: bool,
-    file_type: &mut std::fs::FileType,
     entry_metadata: &mut Option<MetaData>,
     entry_metadata_ext: &mut Option<MetaDataExt>,
 ) -> bool {
-    use crate::core::unix_dir_enum::file_type_from_mode;
     use std::os::unix::fs::PermissionsExt;
     let Some(statx) = statx_result.0 else {
         return false;
     };
     let mode = statx.stx_mode as libc::mode_t;
-    if d_type == libc::DT_UNKNOWN {
-        *file_type = file_type_from_mode(mode);
-    }
     if read_metadata {
         *entry_metadata = Some(MetaData {
             is_dir: (mode & libc::S_IFMT) == libc::S_IFDIR,
@@ -1740,28 +1680,30 @@ fn try_fill_from_statx(
 ))]
 fn try_fill_from_statx(
     _statx_result: crate::core::unix_dir_enum::LinuxStatxResult,
-    _d_type: u8,
     _read_metadata: bool,
     _read_metadata_ext: bool,
-    _file_type: &mut std::fs::FileType,
     _entry_metadata: &mut Option<MetaData>,
     _entry_metadata_ext: &mut Option<MetaDataExt>,
 ) -> bool {
     false
 }
 
-/// Convert (seconds, nanoseconds) to SystemTime; return None for negative seconds (before the epoch).
+/// Convert POSIX seconds and nanoseconds to SystemTime.
 /// Linux glibc stat fields use split sec/nsec form, not timespec.
 #[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
 fn time_to_systemtime(sec: libc::time_t, nsec: i64) -> Option<std::time::SystemTime> {
     use std::time::{Duration, UNIX_EPOCH};
-    if sec < 0 {
-        return None;
-    }
-    UNIX_EPOCH.checked_add(Duration::new(sec as u64, nsec as u32))
+    #[allow(clippy::unnecessary_cast)]
+    let seconds = Duration::from_secs(sec.unsigned_abs() as u64);
+    let base = if sec < 0 {
+        UNIX_EPOCH.checked_sub(seconds)?
+    } else {
+        UNIX_EPOCH.checked_add(seconds)?
+    };
+    base.checked_add(Duration::from_nanos(u64::try_from(nsec).ok()?))
 }
 
-/// Convert libc::statx_timestamp to SystemTime; return None for negative seconds (before the epoch).
+/// Convert libc::statx_timestamp to SystemTime.
 ///
 /// statx uses a separate `statx_timestamp` structure (tv_sec: i64 + tv_nsec: u32 + __reserved: i32),
 /// unlike stat's split sec/nsec fields. stx_btime is the creation time (stat has no corresponding field).
@@ -1772,10 +1714,13 @@ fn time_to_systemtime(sec: libc::time_t, nsec: i64) -> Option<std::time::SystemT
 ))]
 fn statx_time_to_systemtime(ts: libc::statx_timestamp) -> Option<std::time::SystemTime> {
     use std::time::{Duration, UNIX_EPOCH};
-    if ts.tv_sec < 0 {
-        return None;
-    }
-    UNIX_EPOCH.checked_add(Duration::new(ts.tv_sec as u64, ts.tv_nsec))
+    let seconds = Duration::from_secs(ts.tv_sec.unsigned_abs());
+    let base = if ts.tv_sec < 0 {
+        UNIX_EPOCH.checked_sub(seconds)?
+    } else {
+        UNIX_EPOCH.checked_add(seconds)?
+    };
+    base.checked_add(Duration::from_nanos(u64::from(ts.tv_nsec)))
 }
 
 /// Linux dev_t encoding (equivalent to the glibc `makedev` macro).
@@ -1806,4 +1751,284 @@ fn linux_makedev(major: u32, minor: u32) -> u64 {
 thread_local! {
     static IO_STRATEGY_CACHE: std::cell::RefCell<crate::core::fs_detect::IoStrategyCache> =
         std::cell::RefCell::new(crate::core::fs_detect::IoStrategyCache::new());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io;
+
+    #[test]
+    fn retries_transient_errors_but_not_permanent_errors() {
+        let mut attempts = 0;
+        let result = retry_transient_io(3, || {
+            attempts += 1;
+            if attempts < 3 {
+                Err(Error::from_io(
+                    0,
+                    io::Error::from(io::ErrorKind::Interrupted),
+                ))
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(attempts, 3);
+
+        attempts = 0;
+        let error = retry_transient_io::<()>(2, || {
+            attempts += 1;
+            Err(Error::from_io(0, io::Error::from(io::ErrorKind::TimedOut)))
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 3);
+        assert_eq!(error.io_error().unwrap().kind(), io::ErrorKind::TimedOut);
+
+        attempts = 0;
+        let _ = retry_transient_io::<()>(3, || {
+            attempts += 1;
+            Err(Error::from_io(
+                0,
+                io::Error::from(io::ErrorKind::PermissionDenied),
+            ))
+        });
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn sorting_preserves_successes_before_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        let b = dir.path().join("b");
+        std::fs::write(&a, b"a").unwrap();
+        std::fs::write(&b, b"b").unwrap();
+        let entry =
+            |path: &Path| DirEntry::<((), ())>::from_path(1, path, false, false, false, None);
+        let mut entries = vec![
+            Err(Error::from_io(1, io::ErrorKind::NotFound.into())),
+            entry(&b),
+            Err(Error::from_io(1, io::ErrorKind::PermissionDenied.into())),
+            entry(&a),
+        ];
+        sort_dir_entries_by_name(&mut entries);
+        assert_eq!(entries[0].as_ref().unwrap().file_name(), "a");
+        assert_eq!(entries[1].as_ref().unwrap().file_name(), "b");
+        assert!(entries[2..].iter().all(Result::is_err));
+    }
+
+    #[test]
+    fn cloned_options_preserve_callbacks_and_metadata_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("file"), b"data").unwrap();
+        let walker = WalkDirGeneric::<(usize, usize)>::new(dir.path())
+            .parallelism(Parallelism::Serial)
+            .read_metadata(true)
+            .read_metadata_ext(true)
+            .read_hardlink_info(true)
+            .dir_entry_capacity(8)
+            .max_retries(1)
+            .max_receive_buffer_size(2)
+            .root_read_dir_state(3)
+            .process_read_dir(|_, _, state, entries| {
+                *state += 1;
+                for entry in entries.iter_mut().flatten() {
+                    entry.client_state = *state;
+                }
+            });
+        let cloned = WalkDirGeneric {
+            root: walker.root.clone(),
+            options: walker.options.clone(),
+        };
+        for walker in [walker, cloned] {
+            let entries: Vec<_> = walker.into_iter().collect::<Result<Vec<_>>>().unwrap();
+            assert_eq!(entries.len(), 2);
+            assert_eq!(entries[0].client_state, 4);
+            assert_eq!(entries[1].client_state, 5);
+            assert!(entries.iter().all(|e| e.metadata.is_some()));
+            assert!(entries.iter().all(|e| e.metadata_ext.is_some()));
+        }
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        target_env = "gnu",
+        not(feature = "legacy-read-dir")
+    ))]
+    #[test]
+    fn prefetched_statx_preserves_metadata() {
+        use crate::core::unix_dir_enum::{LinuxStatxResult, statx_metadata};
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file");
+        std::fs::write(&path, b"example").unwrap();
+        let expected = std::fs::symlink_metadata(&path).unwrap();
+        let statx = statx_metadata(libc::AT_FDCWD, path.as_os_str()).unwrap();
+
+        let mut metadata = None;
+        let mut extended = None;
+        assert!(try_fill_from_statx(
+            LinuxStatxResult(Some(statx)),
+            true,
+            true,
+            &mut metadata,
+            &mut extended,
+        ));
+        let metadata = metadata.unwrap();
+        let extended = extended.unwrap();
+        assert!(metadata.is_file);
+        assert_eq!(metadata.size, expected.len());
+        assert_eq!(extended.st_ino, expected.ino());
+        assert_eq!(extended.st_dev, expected.dev());
+
+        let mut statx = statx;
+        statx.stx_mask &= !libc::STATX_BTIME;
+        let mut metadata = None;
+        let mut extended = None;
+        assert!(try_fill_from_statx(
+            LinuxStatxResult(Some(statx)),
+            true,
+            false,
+            &mut metadata,
+            &mut extended,
+        ));
+        assert!(metadata.unwrap().created.is_none());
+        assert!(extended.is_none());
+    }
+
+    #[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
+    #[test]
+    fn posix_timestamp_conversion_handles_pre_epoch_values() {
+        use std::time::{Duration, UNIX_EPOCH};
+        assert_eq!(
+            time_to_systemtime(-2, 500_000_000),
+            Some(UNIX_EPOCH - Duration::from_millis(1500))
+        );
+        assert_eq!(time_to_systemtime(0, -1), None);
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        target_env = "gnu",
+        not(feature = "legacy-read-dir"),
+        any(
+            target_arch = "x86_64",
+            target_arch = "aarch64",
+            target_arch = "riscv64",
+            target_arch = "loongarch64",
+            target_arch = "powerpc64"
+        )
+    ))]
+    #[test]
+    fn network_strategy_batches_requested_metadata() {
+        use crate::core::fs_detect::{IoStrategy, IoStrategyCache};
+        use std::os::unix::fs::MetadataExt;
+        if !linux_io_uring_available() {
+            eprintln!("skip: io_uring is unavailable");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        for i in 0..10 {
+            std::fs::write(dir.path().join(format!("file{i}")), b"data").unwrap();
+        }
+        let dev = std::fs::metadata(dir.path()).unwrap().dev();
+        IO_STRATEGY_CACHE.with(|cache| cache.borrow_mut().insert(dev, IoStrategy::NetworkAsync));
+        let entries = WalkDir::new(dir.path())
+            .parallelism(Parallelism::Serial)
+            .read_metadata(true)
+            .read_metadata_ext(true)
+            .into_iter()
+            .collect::<Result<Vec<_>>>()
+            .unwrap();
+        IO_STRATEGY_CACHE.with(|cache| *cache.borrow_mut() = IoStrategyCache::new());
+        assert_eq!(entries.len(), 11);
+        for entry in entries.iter().skip(1) {
+            assert_eq!(entry.metadata.as_ref().unwrap().size, 4);
+            assert_eq!(
+                entry.metadata_ext.as_ref().unwrap().st_ino,
+                std::fs::symlink_metadata(entry.path()).unwrap().ino()
+            );
+        }
+    }
+
+    #[cfg(all(
+        target_os = "linux",
+        target_env = "gnu",
+        not(feature = "legacy-read-dir")
+    ))]
+    #[test]
+    fn metadata_falls_back_when_statx_is_unavailable() {
+        let dir = tempfile::tempdir().unwrap();
+        let directory = dir.path().to_path_buf();
+        std::thread::spawn(move || {
+            use crate::core::unix_dir_enum::{LinuxStatxResult, enumerate_dir_unix};
+            use std::os::unix::fs::MetadataExt;
+            let path = directory.join("file");
+            std::fs::write(&path, b"example").unwrap();
+            let expected = std::fs::metadata(&path).unwrap();
+            let (guard, mut entries) = enumerate_dir_unix(&directory, 1).unwrap();
+
+            // Restrict only this test thread so that statx fails and fstatat remains available.
+            let mut filter = [
+                libc::sock_filter {
+                    code: (libc::BPF_LD | libc::BPF_W | libc::BPF_ABS) as u16,
+                    jt: 0,
+                    jf: 0,
+                    k: 0,
+                },
+                libc::sock_filter {
+                    code: (libc::BPF_JMP | libc::BPF_JEQ | libc::BPF_K) as u16,
+                    jt: 0,
+                    jf: 1,
+                    k: libc::SYS_statx as u32,
+                },
+                libc::sock_filter {
+                    code: (libc::BPF_RET | libc::BPF_K) as u16,
+                    jt: 0,
+                    jf: 0,
+                    k: libc::SECCOMP_RET_ERRNO | libc::EPERM as u32,
+                },
+                libc::sock_filter {
+                    code: (libc::BPF_RET | libc::BPF_K) as u16,
+                    jt: 0,
+                    jf: 0,
+                    k: libc::SECCOMP_RET_ALLOW,
+                },
+            ];
+            let program = libc::sock_fprog {
+                len: filter.len() as u16,
+                filter: filter.as_mut_ptr(),
+            };
+            let allowed = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) } == 0;
+            let installed = allowed
+                && unsafe {
+                    libc::prctl(libc::PR_SET_SECCOMP, libc::SECCOMP_MODE_FILTER, &program)
+                } == 0;
+            if !installed {
+                eprintln!("skip: cannot install thread-local seccomp filter");
+                return;
+            }
+
+            assert_eq!(
+                crate::core::unix_dir_enum::statx_metadata(guard.as_raw_fd(), OsStr::new("file"))
+                    .unwrap_err()
+                    .raw_os_error(),
+                Some(libc::EPERM)
+            );
+            let entry = make_dir_entry_linux::<((), ())>(
+                entries.pop().unwrap(),
+                1,
+                Arc::from(directory.as_path()),
+                true,
+                true,
+                guard.as_raw_fd(),
+                LinuxStatxResult(None),
+                None,
+            )
+            .unwrap();
+            assert_eq!(entry.metadata.unwrap().size, expected.len());
+            assert_eq!(entry.metadata_ext.unwrap().st_ino, expected.ino());
+        })
+        .join()
+        .unwrap();
+    }
 }

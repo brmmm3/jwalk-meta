@@ -31,13 +31,15 @@ const INITIAL_HEAP_CAPACITY: usize = 256;
 
 pub(crate) fn new_priority_queue<T>(
     stop: Arc<AtomicBool>,
-    channel_capacity: usize,
+    _channel_capacity: usize,
 ) -> (PriorityQueue<T>, PriorityQueueIter<T>)
 where
     T: Send,
 {
     let pending_count = Arc::new(AtomicUsize::new(0));
-    let (sender, receiver) = channel::bounded(channel_capacity);
+    // Workers produce more work than they consume, so blocking them on a full
+    // work queue can prevent the only consumer from ever running.
+    let (sender, receiver) = channel::unbounded();
     (
         PriorityQueue {
             sender,
@@ -57,9 +59,6 @@ impl<T> PriorityQueue<T>
 where
     T: Send,
 {
-    /// Blocking push: use send to ensure subdirectory scheduling is not lost.
-    /// Channel capacity is supplied by the caller (4096 by default); it is rarely full for large directories.
-    /// Previously, try_send dropped scheduling requests when the channel was full, skipping directory branches and reducing parallelism.
     pub fn push(&self, weighted: Weighted<T>) -> Result<(), SendError<Weighted<T>>> {
         // fetch_add must precede send to eliminate a false pending_count==0 during the send->fetch_add window.
         // Before the fix (send before fetch_add), the consumer could drain between the two operations, see
@@ -167,8 +166,66 @@ where
                 Err(TryRecvError::Empty) => {
                     std::thread::yield_now();
                 }
+
                 Err(TryRecvError::Disconnected) => return None,
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smallvec::smallvec;
+
+    #[test]
+    fn disconnected_receiver_rolls_back_pending_count() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (queue, receiver) = new_priority_queue(stop, 1);
+        drop(receiver);
+        let result = queue.push(Weighted::new(1, IndexPath::new(smallvec![0]), 1));
+        assert!(result.is_err());
+        assert_eq!(queue.pending_count.load(AtomicOrdering::Acquire), 0);
+    }
+
+    #[test]
+    fn disconnected_producer_ends_iteration_with_pending_work() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (queue, mut receiver) = new_priority_queue(stop, 1);
+        queue
+            .push(Weighted::new(1, IndexPath::new(smallvec![0]), 1))
+            .unwrap();
+        assert_eq!(receiver.next().unwrap().value, 1);
+        drop(queue);
+        assert!(receiver.next().is_none());
+    }
+
+    #[test]
+    fn equal_weight_tasks_prioritize_earlier_paths() {
+        use std::cmp::Ordering;
+        let first = IndexPath::new(smallvec![0, 0]);
+        let second = IndexPath::new(smallvec![0, 1]);
+        assert_eq!(first.partial_cmp(&second), Some(Ordering::Greater));
+        let first = Weighted::new("first", first, 3);
+        let second = Weighted::new("second", second, 3);
+        assert!(first != second);
+        assert!(first == Weighted::new("other value", IndexPath::new(smallvec![0, 0]), 3));
+        assert_eq!(first.partial_cmp(&second), Some(Ordering::Greater));
+        let mut heap = BinaryHeap::from(vec![second, first]);
+        assert_eq!(heap.pop().unwrap().value, "first");
+        assert_eq!(heap.pop().unwrap().value, "second");
+    }
+
+    #[test]
+    fn stop_interrupts_an_empty_queue_with_pending_work() {
+        let stop = Arc::new(AtomicBool::new(false));
+        let (queue, mut receiver) = new_priority_queue(stop.clone(), 1);
+        queue
+            .push(Weighted::new(1, IndexPath::new(smallvec![0]), 1))
+            .unwrap();
+        assert_eq!(receiver.next().unwrap().value, 1);
+        stop.store(true, AtomicOrdering::Release);
+        assert!(receiver.next().is_none());
+        queue.complete_item();
     }
 }

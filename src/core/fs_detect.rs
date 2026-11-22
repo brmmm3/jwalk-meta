@@ -216,6 +216,34 @@ fn probe_latency(path: &Path) -> IoStrategy {
 mod tests {
     use super::*;
 
+    #[test]
+    fn failed_descriptor_and_latency_probes_are_local() {
+        assert_eq!(
+            IoStrategyCache::new().detect_for_fd(Path::new("/missing"), -1),
+            IoStrategy::LocalSync
+        );
+        assert!(statfs_strategy(Path::new("/definitely-missing-jwalk-meta")).is_none());
+        assert_eq!(
+            probe_latency(Path::new("/definitely-missing-jwalk-meta")),
+            IoStrategy::LocalSync
+        );
+        let bad_name = std::ffi::OsStr::from_bytes(b"bad\0name");
+        assert_eq!(probe_latency(Path::new(bad_name)), IoStrategy::LocalSync);
+    }
+
+    #[test]
+    fn uncached_descriptor_strategy_is_cached_for_its_device() {
+        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::io::AsRawFd;
+        let dir = tempfile::tempdir().unwrap();
+        let file = std::fs::File::open(dir.path()).unwrap();
+        let device = file.metadata().unwrap().dev();
+        let mut cache = IoStrategyCache::new();
+        let strategy = cache.detect_for_fd(dir.path(), file.as_raw_fd());
+        assert_eq!(cache.get(device), Some(strategy));
+        assert_eq!(cache.detect_for_fd(dir.path(), file.as_raw_fd()), strategy);
+    }
+
     /// `strategy_from_ftype` returns only a candidate strategy (without latency probing); network filesystems return NetworkAsync.
     /// The final strategy is determined by the latency probe in `statfs_strategy`.
     #[test]

@@ -8,9 +8,8 @@
 //!
 //! # Lifetime requirements
 //!
-//! `CString` and `MaybeUninit<libc::statx>` must remain alive until all CQEs have been reaped.
-//! This module preallocates with `Vec::with_capacity(n)` to prevent reallocation;
-//! `submit_and_wait(n)` blocks synchronously, and buffers can be released only after it returns and the kernel has consumed all SQEs.
+//! `CString` and `MaybeUninit<libc::statx>` remain alive until all submitted requests complete,
+//! including when submission or waiting fails.
 
 #![cfg(all(
     target_os = "linux",
@@ -133,9 +132,6 @@ fn batch_statx_chunk(
     let n = entries.len();
     debug_assert!(n <= RING_SIZE as usize);
 
-    let mut ring: IoUring<io_uring::squeue::Entry, io_uring::cqueue::Entry> =
-        IoUring::builder().setup_submit_all().build(n as u32)?;
-
     // Preallocate capacity and never reallocate (pointer stability is essential).
     // CString uses a heap allocation, so moving a CString in Vec<CString> does not move its underlying buffer.
     let mut cstrings: Vec<Option<CString>> = Vec::with_capacity(n);
@@ -150,6 +146,8 @@ fn batch_statx_chunk(
     // Map submission indices to entry indices (entries skipped due to NUL bytes are not submitted).
     let mut local_to_entry: Vec<usize> = Vec::with_capacity(n);
     let mut submitted = 0usize;
+    let mut ring: IoUring<io_uring::squeue::Entry, io_uring::cqueue::Entry> =
+        IoUring::builder().setup_submit_all().build(n as u32)?;
 
     for (entry_idx, entry) in entries.iter().enumerate() {
         // Skip NUL bytes: CString::new fails.
@@ -193,7 +191,9 @@ fn batch_statx_chunk(
     }
 
     // Block until all submitted SQEs complete. setup_submit_all ensures one failed SQE does not interrupt the batch.
-    ring.submit_and_wait(submitted)?;
+    wait_for_batch(&mut ring, submitted, |ring, count| {
+        ring.submit_and_wait(count)
+    })?;
 
     // Reap CQEs: result==0 means the kernel wrote a complete statx; result<0 means failure, so leave None.
     for cqe in ring.completion() {
@@ -210,7 +210,36 @@ fn batch_statx_chunk(
         // result < 0: leave the result slot as None so the caller uses the fstatat fallback.
     }
 
-    // cstrings and statx_bufs are dropped when this function returns; all CQEs have been reaped, so they can be safely released.
+    Ok(())
+}
+
+fn wait_for_batch(
+    ring: &mut IoUring,
+    submitted: usize,
+    mut submit_and_wait: impl FnMut(&mut IoUring, usize) -> io::Result<usize>,
+) -> io::Result<()> {
+    while ring.completion().len() < submitted {
+        if let Err(error) = submit_and_wait(ring, submitted) {
+            // The syscall may have consumed SQEs before returning an error. Do not
+            // submit the remaining SQEs, and keep their buffers alive until every
+            // consumed request has posted a completion.
+            let consumed = submitted - ring.submission().len();
+            while ring.completion().len() < consumed {
+                let result = unsafe {
+                    ring.submitter().enter::<libc::sigset_t>(
+                        0,
+                        consumed as u32,
+                        io_uring::EnterFlags::GETEVENTS.bits(),
+                        None,
+                    )
+                };
+                if result.is_err() {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+            return Err(error);
+        }
+    }
     Ok(())
 }
 
@@ -222,10 +251,10 @@ mod tests {
     use std::os::unix::fs::MetadataExt;
 
     /// Construct a minimal LinuxDirEntryOwned (d_type and name only; statx=None).
-    fn make_entry(d_type: u8, name: &str) -> LinuxDirEntryOwned {
+    fn make_entry(_d_type: u8, name: &str) -> LinuxDirEntryOwned {
         LinuxDirEntryOwned {
-            d_type,
             name: OsString::from(name),
+            file_type: fs::metadata("/dev/null").unwrap().file_type(),
         }
     }
 
@@ -314,6 +343,33 @@ mod tests {
         let mut statx_results = LinuxStatxResults::default();
         let result = batch_statx_via_io_uring(&mut entries, -1, &mut statx_results);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn failed_wait_drains_submitted_requests() {
+        if !io_uring_enabled() {
+            eprintln!("skip: io_uring not available");
+            return;
+        }
+        let path = CString::new("/dev/null").unwrap();
+        let mut output = MaybeUninit::<libc::statx>::zeroed();
+        let mut ring: IoUring = IoUring::builder().setup_submit_all().build(1).unwrap();
+        let sqe = opcode::Statx::new(
+            types::Fd(libc::AT_FDCWD),
+            path.as_ptr(),
+            output.as_mut_ptr().cast(),
+        )
+        .mask(libc::STATX_BASIC_STATS)
+        .build();
+        unsafe { ring.submission().push(&sqe).unwrap() };
+
+        let error = wait_for_batch(&mut ring, 1, |ring, _| {
+            ring.submit()?;
+            Err(io::Error::from(io::ErrorKind::Interrupted))
+        })
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+        assert_eq!(ring.completion().count(), 1);
     }
 
     /// An entry with a NUL byte in its name is skipped; the remaining entries are processed normally.

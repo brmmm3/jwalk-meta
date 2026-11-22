@@ -8,6 +8,7 @@ Forked from [jwalk](https://github.com/Byron/jwalk). It preserves the original p
 
 - **rayon parallel traversal** — Directory-level parallelism automatically uses all CPU cores.
 - **NT Native API enumeration** (Windows) — Uses `NtQueryDirectoryFileEx` with a 64 KB batch buffer instead of `FindFirstFile/FindNextFile`. Each system call retrieves hundreds of entries, greatly reducing user/kernel transitions.
+- **Linux enumeration** — Uses the standard library's directory-entry types, with streaming dispatch and relative metadata queries.
 - **Streaming subdirectory dispatch** — While enumerating a huge directory, subdirectories discovered in each NtQuery batch are immediately added to the scheduling queue instead of waiting for the entire directory to finish. This eliminates startup latency when traversing directories with millions of entries.
 - **Priority-flood scheduling** — `weight = parent_weight + subdir_count`. Branches with more subdirectories receive higher scheduling priority, automatically assigning more threads to the largest subtrees.
 - **Ordered streaming output** — DFS preorder ensures parent directories are emitted before their children; `OrderedMatcher` tracks the traversal cursor.

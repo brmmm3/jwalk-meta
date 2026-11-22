@@ -318,7 +318,9 @@ fn parse_buffer_entries(buffer: &[u8], mut on_entry: impl FnMut(&FILE_ID_BOTH_DI
         let entry = unsafe { std::ptr::read_unaligned(entry_ptr as *const FILE_ID_BOTH_DIR_INFO) };
 
         let name_len = entry.FileNameLength as usize;
-        let name_chars = name_len / 2;
+        if name_len % 2 != 0 {
+            break;
+        }
 
         // Bounds check: ensure all variable-length FileName data is within buffer.
         let name_start_offset = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
@@ -326,23 +328,13 @@ fn parse_buffer_entries(buffer: &[u8], mut on_entry: impl FnMut(&FILE_ID_BOTH_DI
             break;
         }
 
-        // Compare "." and ".." as raw UTF-16 to avoid a to_string_lossy heap allocation.
-        // FileName is a C variable-length array ([u16; 1]); access it through a pointer to avoid compiler bounds checks.
-        let first_char = entry.FileName[0];
-        let is_dot = name_chars == 1 && first_char == b'.' as u16;
-        let is_dotdot = name_chars == 2
-            && first_char == b'.' as u16
-            // SAFETY: name_chars == 2 guarantees at least 2 u16 elements in FileName
-            && unsafe { *entry.FileName.as_ptr().add(1) } == b'.' as u16;
-
-        if !is_dot && !is_dotdot {
-            // SAFETY: The bounds check ensures name_len bytes of FileName are within buffer.
-            let name_slice = unsafe {
-                let name_start = entry_ptr.add(name_start_offset);
-                std::slice::from_raw_parts(name_start as *const u16, name_chars)
-            };
-            let file_name = OsString::from_wide(name_slice);
-
+        let name_bytes = &buffer[offset + name_start_offset..offset + name_start_offset + name_len];
+        let name: Vec<u16> = name_bytes
+            .chunks_exact(2)
+            .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
+            .collect();
+        if name != [b'.' as u16] && name != [b'.' as u16, b'.' as u16] {
+            let file_name = OsString::from_wide(&name);
             on_entry(&entry, file_name);
         }
 
@@ -425,7 +417,13 @@ fn enumerate_dir_core_inner(
             break;
         }
 
-        parse_buffer_entries(buffer, &mut on_entry);
+        let valid = buffer.get(..bytes_returned).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid directory result length",
+            )
+        })?;
+        parse_buffer_entries(valid, &mut on_entry);
     }
 
     Ok(())
@@ -668,5 +666,34 @@ impl FsType {
     #[inline]
     pub fn is_fat_family(self) -> bool {
         matches!(self, FsType::Fat32 | FsType::ExFat)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skips_dot_entries_and_reads_full_name_from_buffer() {
+        let record_size = 128;
+        let mut buffer = vec![0u8; record_size * 3];
+        for (i, name) in [".", "..", "file"].iter().enumerate() {
+            let offset = i * record_size;
+            let next = if i == 2 { 0u32 } else { record_size as u32 };
+            buffer[offset..offset + 4].copy_from_slice(&next.to_ne_bytes());
+            let chars: Vec<u16> = name.encode_utf16().collect();
+            let length = (chars.len() * 2) as u32;
+            let length_offset =
+                offset + std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileNameLength);
+            buffer[length_offset..length_offset + 4].copy_from_slice(&length.to_ne_bytes());
+            let name_offset = offset + std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
+            for (j, ch) in chars.iter().enumerate() {
+                buffer[name_offset + j * 2..name_offset + j * 2 + 2]
+                    .copy_from_slice(&ch.to_ne_bytes());
+            }
+        }
+        let mut names = Vec::new();
+        parse_buffer_entries(&buffer, |_, name| names.push(name));
+        assert_eq!(names, [OsString::from("file")]);
     }
 }

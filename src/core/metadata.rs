@@ -142,11 +142,16 @@ impl MetaData {
 /// in lib.rs) populate `changed` directly from `stat.st_ctime` / `statx.stx_ctime`.
 #[cfg(unix)]
 #[inline]
-fn changed_time_from_metadata(_metadata: &fs::Metadata) -> Option<SystemTime> {
-    // ponytail: std::os::unix::fs::MetadataExt::ctime() is unstable (rust-lang/rust#63010).
-    // Unix stable has no public API to read st_ctime from fs::Metadata without a re-stat.
-    // Returns None; main scan paths (statx/fstatat) populate `changed` directly.
-    None
+fn changed_time_from_metadata(metadata: &fs::Metadata) -> Option<SystemTime> {
+    let seconds = metadata.ctime();
+    let nanos = u32::try_from(metadata.ctime_nsec()).ok()?;
+    let duration = std::time::Duration::new(seconds.unsigned_abs(), 0);
+    let base = if seconds < 0 {
+        std::time::UNIX_EPOCH.checked_sub(duration)?
+    } else {
+        std::time::UNIX_EPOCH.checked_add(duration)?
+    };
+    base.checked_add(std::time::Duration::from_nanos(u64::from(nanos)))
 }
 
 #[cfg(windows)]
@@ -188,11 +193,11 @@ pub struct AncestorIdentity {
 
 #[cfg(unix)]
 impl AncestorIdentity {
-    /// Compute the identity from a path's symlink_metadata.
+    /// Compute the identity of the directory reached by this path.
     ///
     /// Return None if metadata retrieval fails (conservative policy: skip loop detection for this ancestor).
     pub fn from_path(path: Arc<Path>) -> Option<Self> {
-        let meta = fs::symlink_metadata(path.as_ref()).ok()?;
+        let meta = fs::metadata(path.as_ref()).ok()?;
         Some(AncestorIdentity {
             path,
             dev: meta.dev(),
@@ -214,11 +219,11 @@ pub struct AncestorIdentity {
 
 #[cfg(windows)]
 impl AncestorIdentity {
-    /// Compute the identity from a path's symlink_metadata.
+    /// Compute the identity of the directory reached by this path.
     ///
     /// Return None if metadata retrieval fails (conservative policy: skip loop detection for this ancestor).
     pub fn from_path(path: Arc<Path>) -> Option<Self> {
-        let meta = fs::symlink_metadata(path.as_ref()).ok()?;
+        let meta = fs::metadata(path.as_ref()).ok()?;
         let ext = get_metadata_ext(&meta, path.as_ref());
         Some(AncestorIdentity {
             path,

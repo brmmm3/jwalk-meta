@@ -43,7 +43,7 @@ impl<C: ClientState> ReadDir<C> {
         // Single-pass traversal: skip the portion already streamed and construct Weighted<ReadDirSpec> directly.
         // Increment subdir_counter only for subdirectories that produce a spec,
         // ensuring a contiguous IndexPath sequence (0,1,2,...) instead of gaps from enumerate indices.
-        let mut specs = Vec::with_capacity(pipe_size.saturating_sub(skip));
+        let mut specs = Vec::new();
         let mut subdir_counter = 0usize;
         for entry_result in self.results_list.iter() {
             if let Some(spec) = entry_result

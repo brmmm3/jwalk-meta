@@ -1,6 +1,6 @@
 [package]
 name = "jwalk-meta"
-version = "1.2.0"
+version = "1.3.0"
 authors = ["Jesse Grosjean <jesse@hogbaysoftware.com>", "Sebastian Thiel <byronimo@gmail.com>", "Martin Bammer <mrbm74@gmail.com>"]
 description = "Filesystem walk performed in parallel with streamed and sorted results."
 documentation = "https://docs.rs/jwalk-meta/"
@@ -14,8 +14,8 @@ edition = "2024"
 
 [features]
 default = []
-# When enabled, force Unix to use the std::fs::read_dir fallback for benchmark comparisons.
-# When disabled, Linux uses the direct getdents64 path.
+# When enabled, use the legacy metadata and traversal path for benchmark comparisons.
+# The default Linux path uses std::fs::read_dir with streaming dispatch and batched metadata.
 legacy-read-dir = []
 windows-only = []  # Windows-only examples (class77_poc, test_ft); enable with --features windows-only.
 

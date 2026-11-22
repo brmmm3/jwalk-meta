@@ -355,3 +355,92 @@ impl From<Error> for io::Error {
         io::Error::new(kind, walk_err)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn io_error_preserves_context_and_source() {
+        let error = Error::from_path(
+            2,
+            PathBuf::from("missing/file"),
+            io::Error::from(io::ErrorKind::NotFound),
+        );
+        assert_eq!(error.path(), Some(Path::new("missing/file")));
+        assert_eq!(error.depth(), 2);
+        assert_eq!(error.io_error().unwrap().kind(), io::ErrorKind::NotFound);
+        assert!(error::Error::source(&error).is_some());
+        assert!(error.to_string().contains("missing/file"));
+        let converted: io::Error = error.into();
+        assert_eq!(converted.kind(), io::ErrorKind::NotFound);
+        assert!(
+            converted
+                .get_ref()
+                .unwrap()
+                .downcast_ref::<Error>()
+                .is_some()
+        );
+
+        let error = Error::from_io(3, io::Error::from(io::ErrorKind::PermissionDenied));
+        assert_eq!(error.path(), None);
+        assert_eq!(error.to_string(), "permission denied");
+        assert_eq!(
+            error.into_io_error().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+    }
+
+    #[test]
+    fn loop_and_busy_errors_preserve_their_meaning() {
+        let error = Error::from_loop(4, Path::new("ancestor"), Path::new("child"));
+        assert_eq!(error.loop_ancestor(), Some(Path::new("ancestor")));
+        assert_eq!(error.path(), Some(Path::new("child")));
+        assert!(error.io_error().is_none());
+        assert!(error::Error::source(&error).is_none());
+        assert!(error.to_string().contains("ancestor"));
+        assert!(!is_transient_error(&error));
+        let converted: io::Error = error.into();
+        assert_eq!(converted.kind(), io::ErrorKind::Other);
+
+        let error = Error::busy();
+        assert!(error.is_busy());
+        assert_eq!(error.path(), None);
+        assert!(error.to_string().contains("too busy"));
+        assert!(!is_transient_error(&error));
+        assert_eq!(io::Error::from(error).kind(), io::ErrorKind::Other);
+        assert!(Error::busy().into_io_error().is_none());
+    }
+
+    #[test]
+    fn transient_error_classification() {
+        for kind in [
+            io::ErrorKind::TimedOut,
+            io::ErrorKind::Interrupted,
+            io::ErrorKind::WouldBlock,
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionAborted,
+        ] {
+            assert!(is_transient_error(&Error::from_io(
+                0,
+                io::Error::from(kind)
+            )));
+        }
+        assert!(!is_transient_error(&Error::from_io(
+            0,
+            io::Error::from(io::ErrorKind::PermissionDenied)
+        )));
+        #[cfg(unix)]
+        for code in [11, 16, 150] {
+            assert!(is_transient_error(&Error::from_io(
+                0,
+                io::Error::from_raw_os_error(code)
+            )));
+        }
+        #[cfg(unix)]
+        assert!(!is_transient_error(&Error::from_io(
+            0,
+            io::Error::from_raw_os_error(libc::ENOENT)
+        )));
+    }
+}

@@ -12,6 +12,25 @@ use jwalk_meta::*;
 use util::Dir;
 
 #[test]
+fn depth_limits_and_fallible_iterator_match_builder_settings() {
+    let dir = Dir::tmp();
+    dir.mkdirp("child");
+    dir.touch("child/grandchild");
+    let walker = WalkDir::new(dir.path())
+        .max_depth(1)
+        .min_depth(4)
+        .parallelism(Parallelism::Serial);
+    assert_eq!(walker.root(), dir.path());
+    let entries = walker
+        .try_into_iter()
+        .unwrap()
+        .collect::<Result<Vec<_>>>()
+        .unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].path(), dir.join("child"));
+}
+
+#[test]
 fn empty() {
     let dir = Dir::tmp();
     let wd = WalkDir::new(dir.path());
@@ -1271,6 +1290,134 @@ fn priority_scheduling_single_thread_no_deadlock() {
         "expected >= 7 entries, got {}",
         r.ents().len()
     );
+}
+
+#[test]
+fn small_channels_do_not_deadlock_single_worker() {
+    for capacity in [0, 1] {
+        for sort in [false, true] {
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let dir = Dir::tmp();
+                for name in ["a", "b", "c"] {
+                    dir.mkdirp(name);
+                    dir.touch(format!("{name}/file"));
+                }
+                let results = dir.run_recursive(
+                    WalkDir::new(dir.path())
+                        .parallelism(Parallelism::RayonNewPool(1))
+                        .channel_capacity(capacity)
+                        .sort(sort),
+                );
+                results.assert_no_errors();
+                tx.send(results.ents().len()).unwrap();
+            });
+            assert_eq!(
+                rx.recv_timeout(std::time::Duration::from_secs(10))
+                    .expect("walk stalled or worker panicked"),
+                7,
+                "capacity={capacity}, sort={sort}"
+            );
+        }
+    }
+}
+
+#[test]
+fn new_pools_respect_each_requested_size() {
+    let dir = Dir::tmp();
+    let observed = std::sync::Arc::new(Mutex::new(Vec::new()));
+    for threads in [1, 4, 1] {
+        let observed = observed.clone();
+        let results = dir.run_recursive(
+            WalkDir::new(dir.path())
+                .parallelism(Parallelism::RayonNewPool(threads))
+                .process_read_dir(move |depth, _, _, _| {
+                    if depth.is_some() {
+                        observed.lock().unwrap().push(rayon::current_num_threads());
+                    }
+                }),
+        );
+        results.assert_no_errors();
+    }
+    assert_eq!(*observed.lock().unwrap(), [1, 4, 1]);
+}
+
+#[cfg(unix)]
+#[test]
+fn metadata_options_apply_to_root_and_children() {
+    use std::os::unix::fs::MetadataExt;
+    let dir = Dir::tmp();
+    dir.touch("file");
+    let results = dir.run_recursive(
+        WalkDir::new(dir.path())
+            .parallelism(Parallelism::Serial)
+            .read_metadata_ext(true),
+    );
+    results.assert_no_errors();
+    assert!(
+        results
+            .ents()
+            .iter()
+            .all(|entry| entry.metadata_ext.is_some())
+    );
+    assert!(results.ents().iter().all(|entry| entry.metadata.is_none()));
+
+    let results = dir.run_recursive(
+        WalkDir::new(dir.path())
+            .parallelism(Parallelism::Serial)
+            .read_metadata(true),
+    );
+    results.assert_no_errors();
+    for entry in results.ents() {
+        let expected = fs::symlink_metadata(entry.path()).unwrap();
+        let actual = entry.metadata.as_ref().unwrap().changed.unwrap();
+        let expected_time = std::time::UNIX_EPOCH
+            + std::time::Duration::new(expected.ctime() as u64, expected.ctime_nsec() as u32);
+        assert_eq!(actual, expected_time);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn metadata_preserves_pre_epoch_modified_time() {
+    let dir = Dir::tmp();
+    dir.touch("file");
+    let expected = std::time::UNIX_EPOCH - std::time::Duration::from_millis(1500);
+    fs::File::open(dir.join("file"))
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(expected))
+        .unwrap();
+    let results = dir.run_recursive(
+        WalkDir::new(dir.path())
+            .parallelism(Parallelism::Serial)
+            .read_metadata(true),
+    );
+    results.assert_no_errors();
+    let file = results
+        .ents()
+        .iter()
+        .find(|e| e.file_name() == "file")
+        .unwrap();
+    assert_eq!(file.metadata.as_ref().unwrap().modified, Some(expected));
+}
+
+#[cfg(unix)]
+#[test]
+fn follows_symlink_root_without_missing_cycles() {
+    let dir = Dir::tmp();
+    dir.mkdirp("target");
+    dir.symlink_dir("target", "root-link");
+    std::os::unix::fs::symlink(".", dir.join("target/self")).unwrap();
+    for parallelism in [Parallelism::Serial, Parallelism::RayonNewPool(2)] {
+        let results: Vec<_> = WalkDir::new(dir.join("root-link"))
+            .follow_links(true)
+            .parallelism(parallelism)
+            .into_iter()
+            .take(8)
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert!(results[1].as_ref().unwrap_err().loop_ancestor().is_some());
+    }
 }
 
 #[test]
