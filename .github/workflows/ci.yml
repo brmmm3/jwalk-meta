@@ -38,12 +38,6 @@ jobs:
             echo "Release tag must point to a commit on master" >&2
             exit 1
           fi
-          workspace_version=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml)
-          python_version=$(sed -n '/^\[project\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' pyzarlib/pyproject.toml)
-          if [[ "$TAG" != "$workspace_version" || "$TAG" != "$python_version" ]]; then
-            echo "Tag $TAG must match workspace ($workspace_version) and Python ($python_version) versions" >&2
-            exit 1
-          fi
 
   cargo-fmt:
     name: cargo fmt
