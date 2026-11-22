@@ -41,8 +41,7 @@ const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
 
 // ── FFI structures ──────────────────────────────────────────────────────
 
-/// Directory entry information structure returned by NtQueryDirectoryFileEx.
-/// Corresponds to the Windows FILE_ID_BOTH_DIR_INFO structure.
+/// Fixed-size header of the variable-length FILE_ID_BOTH_DIR_INFORMATION record.
 #[repr(C)]
 #[allow(non_snake_case)]
 struct FILE_ID_BOTH_DIR_INFO {
@@ -60,7 +59,6 @@ struct FILE_ID_BOTH_DIR_INFO {
     ShortNameLength: i8,
     ShortName: [u16; 12],
     FileId: i64,
-    FileName: [u16; 1],
 }
 
 /// NT I/O status block, an output parameter for NtQueryDirectoryFileEx.
@@ -303,32 +301,30 @@ fn open_dir_handle(path: &Path) -> io::Result<HandleGuard> {
 /// SAFETY: The caller must ensure that buffer contains valid data returned by the NT API.
 fn parse_buffer_entries(buffer: &[u8], mut on_entry: impl FnMut(&FILE_ID_BOTH_DIR_INFO, OsString)) {
     let mut offset: usize = 0;
-    let buf_len = buffer.len();
+    let header_len = std::mem::size_of::<FILE_ID_BOTH_DIR_INFO>();
     loop {
-        // Bounds check: ensure the complete entry header can be read (including the first element of the variable-length FileName).
-        // Kernel data is generally trusted; this check guards against memory corruption or an invalid NextEntryOffset.
-        if offset + std::mem::size_of::<FILE_ID_BOTH_DIR_INFO>() > buf_len {
+        let Some(record) = buffer.get(offset..) else {
+            break;
+        };
+        if record.len() < header_len {
             break;
         }
 
-        // SAFETY: The bounds check ensures offset..offset+size_of is within buffer.
-        // FILE_ID_BOTH_DIR_INFO may appear at unaligned offsets (NT only guarantees
-        // 4-byte alignment, but the struct has u64 fields requiring 8-byte alignment).
-        let entry_ptr = unsafe { buffer.as_ptr().add(offset) };
-        let entry = unsafe { std::ptr::read_unaligned(entry_ptr as *const FILE_ID_BOTH_DIR_INFO) };
+        // The fixed-size header is present, but may be unaligned.
+        let entry =
+            unsafe { std::ptr::read_unaligned(record.as_ptr().cast::<FILE_ID_BOTH_DIR_INFO>()) };
 
         let name_len = entry.FileNameLength as usize;
         if name_len % 2 != 0 {
             break;
         }
 
-        // Bounds check: ensure all variable-length FileName data is within buffer.
-        let name_start_offset = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
-        if offset + name_start_offset + name_len > buf_len {
+        let Some(name_end) = header_len.checked_add(name_len) else {
             break;
-        }
-
-        let name_bytes = &buffer[offset + name_start_offset..offset + name_start_offset + name_len];
+        };
+        let Some(name_bytes) = record.get(header_len..name_end) else {
+            break;
+        };
         let name: Vec<u16> = name_bytes
             .chunks_exact(2)
             .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
@@ -342,7 +338,10 @@ fn parse_buffer_entries(buffer: &[u8], mut on_entry: impl FnMut(&FILE_ID_BOTH_DI
         if next_offset == 0 {
             break;
         }
-        offset += next_offset as usize;
+        let Some(next) = offset.checked_add(next_offset as usize) else {
+            break;
+        };
+        offset = next;
     }
 }
 
@@ -686,7 +685,7 @@ mod tests {
             let length_offset =
                 offset + std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileNameLength);
             buffer[length_offset..length_offset + 4].copy_from_slice(&length.to_ne_bytes());
-            let name_offset = offset + std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileName);
+            let name_offset = offset + std::mem::size_of::<FILE_ID_BOTH_DIR_INFO>();
             for (j, ch) in chars.iter().enumerate() {
                 buffer[name_offset + j * 2..name_offset + j * 2 + 2]
                     .copy_from_slice(&ch.to_ne_bytes());
@@ -695,5 +694,30 @@ mod tests {
         let mut names = Vec::new();
         parse_buffer_entries(&buffer, |_, name| names.push(name));
         assert_eq!(names, [OsString::from("file")]);
+    }
+
+    #[test]
+    fn reads_short_final_entries_without_trailing_padding() {
+        let name_offset = std::mem::size_of::<FILE_ID_BOTH_DIR_INFO>();
+        for name in ["a", "ab", "abc", "\u{1f600}"] {
+            let chars: Vec<u16> = name.encode_utf16().collect();
+            let first_record_size = 112;
+            let mut buffer = vec![0u8; first_record_size + name_offset + chars.len() * 2];
+            let length_offset = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileNameLength);
+            buffer[..4].copy_from_slice(&(first_record_size as u32).to_ne_bytes());
+            buffer[length_offset..length_offset + 4].copy_from_slice(&2u32.to_ne_bytes());
+            buffer[name_offset..name_offset + 2].copy_from_slice(&(b'p' as u16).to_ne_bytes());
+            let final_length_offset = first_record_size + length_offset;
+            buffer[final_length_offset..final_length_offset + 4]
+                .copy_from_slice(&((chars.len() * 2) as u32).to_ne_bytes());
+            for (i, ch) in chars.iter().enumerate() {
+                let offset = first_record_size + name_offset + i * 2;
+                buffer[offset..offset + 2].copy_from_slice(&ch.to_ne_bytes());
+            }
+
+            let mut names = Vec::new();
+            parse_buffer_entries(&buffer, |_, entry_name| names.push(entry_name));
+            assert_eq!(names, [OsString::from("p"), OsString::from(name)]);
+        }
     }
 }

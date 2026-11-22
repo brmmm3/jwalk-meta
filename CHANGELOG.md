@@ -5,9 +5,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
 ## [1.3.0] - 2026-11-22
+
+### Changed
 
 - Use standard-library directory enumeration on Linux while retaining streaming dispatch and relative metadata queries.
 - Apply `channel_capacity` to the ordered result channel; the work queue is now unbounded to prevent scheduling deadlocks.
@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Respect the requested thread count when reusing Rayon pools.
 - Populate root extended metadata independently of basic metadata and preserve Unix change timestamps.
 - Safely parse Windows directory names and keep Linux `io_uring` buffers alive until submitted requests complete, including on wait errors.
+- Preserve short final directory entries on Windows when their records have no trailing padding.
 
 ## [1.2.0] - 2026-10-31
 
