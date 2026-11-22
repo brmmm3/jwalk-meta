@@ -1,21 +1,104 @@
-name: Rust
+name: CI
 
 on:
   push:
-    branches: [main, master]
+    tags:
+      - '[0-9]*.[0-9]*.[0-9]*'
   pull_request:
-    branches: [main, master]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref_name }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
 jobs:
-  build-and-test:
+  validate-release:
+    name: Validate release tag
+    if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
-    - uses: Swatinem/rust-cache@v2
-    - name: tests
-      run: cargo test
-    - name: docs
-      run: cargo doc
-    - name: bench
-      run: JWALK_BENCHMARK_DIR=~/ cargo bench
+      - name: Checkout tag and master history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate version and source commit
+        env:
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          if [[ ! "$TAG" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag must be a stable x.y.z version" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor HEAD origin/master; then
+            echo "Release tag must point to a commit on master" >&2
+            exit 1
+          fi
+          workspace_version=$(sed -n '/^\[workspace.package\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' Cargo.toml)
+          python_version=$(sed -n '/^\[project\]/,/^\[/{s/^version = "\(.*\)"/\1/p}' pyzarlib/pyproject.toml)
+          if [[ "$TAG" != "$workspace_version" || "$TAG" != "$python_version" ]]; then
+            echo "Tag $TAG must match workspace ($workspace_version) and Python ($python_version) versions" >&2
+            exit 1
+          fi
+
+  cargo-fmt:
+    name: cargo fmt
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # zizmor: ignore[unpinned-uses]
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+  cargo-clippy:
+    name: cargo clippy
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64
+      CFLAGS: -march=x86-64
+      CXXFLAGS: -march=x86-64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # zizmor: ignore[unpinned-uses]
+        with:
+          toolchain: stable
+          components: clippy
+      - name: Run clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  cargo-test:
+    name: Rust workspace tests
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: -C target-cpu=x86-64
+      CFLAGS: -march=x86-64
+      CXXFLAGS: -march=x86-64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Install XCB development library
+        run: sudo apt-get update && sudo apt-get install --yes libxcb1-dev
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # zizmor: ignore[unpinned-uses]
+        with:
+          toolchain: stable
+      - name: Run workspace tests
+        run: cargo test --workspace
+
