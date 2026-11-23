@@ -302,6 +302,7 @@ fn open_dir_handle(path: &Path) -> io::Result<HandleGuard> {
 fn parse_buffer_entries(buffer: &[u8], mut on_entry: impl FnMut(&FILE_ID_BOTH_DIR_INFO, OsString)) {
     let mut offset: usize = 0;
     let header_len = std::mem::size_of::<FILE_ID_BOTH_DIR_INFO>();
+    let mut name = Vec::new();
     loop {
         let Some(record) = buffer.get(offset..) else {
             break;
@@ -325,10 +326,14 @@ fn parse_buffer_entries(buffer: &[u8], mut on_entry: impl FnMut(&FILE_ID_BOTH_DI
         let Some(name_bytes) = record.get(header_len..name_end) else {
             break;
         };
-        let name: Vec<u16> = name_bytes
-            .chunks_exact(2)
-            .map(|pair| u16::from_ne_bytes([pair[0], pair[1]]))
-            .collect();
+        name.clear();
+        name.extend(
+            name_bytes
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|pair| u16::from_ne_bytes([pair[0], pair[1]])),
+        );
         if name != [b'.' as u16] && name != [b'.' as u16, b'.' as u16] {
             let file_name = OsString::from_wide(&name);
             on_entry(&entry, file_name);
@@ -719,5 +724,39 @@ mod tests {
             parse_buffer_entries(&buffer, |_, entry_name| names.push(entry_name));
             assert_eq!(names, [OsString::from("p"), OsString::from(name)]);
         }
+    }
+
+    #[test]
+    fn preserves_wide_names_when_reusing_buffer() {
+        let record_size = 128;
+        let wide_names: &[&[u16]] = &[&[0x4e2d, 0x6587, 0xd83d, 0xde00], &[0xd800], &[0x61]];
+        let mut buffer = vec![0u8; record_size * wide_names.len()];
+        let header_len = std::mem::size_of::<FILE_ID_BOTH_DIR_INFO>();
+        let length_offset = std::mem::offset_of!(FILE_ID_BOTH_DIR_INFO, FileNameLength);
+        for (index, wide_name) in wide_names.iter().enumerate() {
+            let offset = index * record_size;
+            let next = if index + 1 == wide_names.len() {
+                0
+            } else {
+                record_size as u32
+            };
+            buffer[offset..offset + 4].copy_from_slice(&next.to_ne_bytes());
+            buffer[offset + length_offset..offset + length_offset + 4]
+                .copy_from_slice(&((wide_name.len() * 2) as u32).to_ne_bytes());
+            for (char_index, character) in wide_name.iter().enumerate() {
+                let position = offset + header_len + char_index * 2;
+                buffer[position..position + 2].copy_from_slice(&character.to_ne_bytes());
+            }
+        }
+
+        let mut names = Vec::new();
+        parse_buffer_entries(&buffer, |_, name| names.push(name));
+        assert_eq!(
+            names,
+            wide_names
+                .iter()
+                .map(|name| OsString::from_wide(name))
+                .collect::<Vec<_>>()
+        );
     }
 }
