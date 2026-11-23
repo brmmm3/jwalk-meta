@@ -25,7 +25,6 @@ fn main() {
     #[cfg(not(unix))]
     {
         println!("Backend: this example targets Unix; on Windows use scan_bench.rs instead");
-        return;
     }
 
     #[cfg(all(target_os = "linux", not(feature = "legacy-read-dir")))]
